@@ -1,92 +1,181 @@
-# Agent应用项目
+# LangChain RAG 示例项目
 
+你是一个资深的AI Agent系统架构师和全栈工程师。
 
+请你设计一个“编程教练 Agent 系统”的完整项目框架（Project Skeleton + Architecture Design），用于指导后续开发团队实现。注意这是“框架设计”，不是完整实现，请保留扩展空间。
 
-## Getting started
+========================
+🎯 项目目标
+========================
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+该系统是一个“多模式编程教练 Agent”，用于帮助用户提升编程能力，而不是简单的代码问答工具。
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+Agent需要具备以下核心能力：
 
-## Add your files
+1. 主动制定训练计划（Planning）
+2. 多轮推理与决策（ReAct / Reflexion）
+3. 调用外部工具（Tool Use）
+4. 自我反思与策略调整（Reflexion）
+5. 用户建模（User Modeling）
+6. 多模式训练支持（不仅限于算法）
 
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/ee/gitlab-basics/add-file.html#add-a-file-using-the-command-line) or push an existing Git repository with the following command:
+系统需要支持以下五种训练场景：
 
-```
-cd existing_repo
-git remote add origin http://172.29.4.49/2026seiii-101-sudomakemeateam/agent.git
-git branch -M master
-git push -uf origin master
-```
+1️⃣ 算法训练（出题 → 写代码 → 自动测试 → debug → 优化）
+2️⃣ 设计训练（OOP结构分析与改进）
+3️⃣ 项目引导（从0到1逐步完成项目）
+4️⃣ 代码审查 / 重构（代码质量提升）
+5️⃣ 学习路径规划（长期能力提升）
 
-## Integrate with your tools
+========================
+🧠 Agent设计要求
+========================
 
-- [ ] [Set up project integrations](http://172.29.4.49/2026seiii-101-sudomakemeateam/agent/-/settings/integrations)
+请在框架中体现清晰的Agent结构，包括但不限于：
 
-## Collaborate with your team
+- Planner（训练计划制定）
+- Executor（执行任务）
+- Evaluator（评估结果）
+- Reflector（反思与调整）
+- UserModel（用户画像管理）
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Automatically merge when pipeline succeeds](https://docs.gitlab.com/ee/user/project/merge_requests/merge_when_pipeline_succeeds.html)
+Agent需要支持以下推理机制：
 
-## Test and Deploy
+- ReAct（Thought / Action / Observation）
+- Reflexion（基于失败的自我改进）
+- 可选：Plan-and-Execute 或 Tree-of-Thought（保留扩展）
 
-Use the built-in continuous integration in GitLab.
+请设计一个“Step/Trace结构”，用于记录：
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/index.html)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing(SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+- thought
+- action
+- tool调用
+- observation
 
-***
+该结构必须清晰，便于后续做“Agent过程可视化”和“评估平台”。
 
-# Editing this README
+========================
+🛠 工具系统（Tooling）
+========================
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thank you to [makeareadme.com](https://www.makeareadme.com/) for this template.
+Agent必须通过工具完成任务，请设计工具抽象层，包括：
 
-## Suggestions for a good README
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+- run_code（代码执行，建议隔离执行环境）
+- generate_tests（测试用例生成）
+- analyze_error（错误分析）
+- code_lint / code_quality（可选）
+- design_analyzer（用于OOP分析）
+- project_planner（用于任务拆解）
 
-## Name
-Choose a self-explaining name for your project.
+要求：
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+- 使用统一Tool接口（如Tool Registry）
+- 支持扩展（插件式设计）
+- 工具调用过程必须可记录
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+========================
+🧱 技术栈要求（必须体现）
+========================
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+请在设计中合理使用以下技术（可以组合）：
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+后端：
+- Python（推荐）或 Java（如Spring Boot）
+- LangChain 或类似Agent框架（用于工具调用与链式推理）
+- 可选：LangGraph（用于复杂流程控制）
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+Agent推理：
+- ReAct
+- Reflexion
+- Prompt Engineering（需模块化）
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+前端：
+- Gradio（快速原型）或 Web UI（React/Vue）
+- 必须支持“Agent执行过程可视化”（如Timeline / Step Panel）
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+执行环境：
+- Docker（用于代码执行隔离）
+- 可设计 runner 服务（独立容器）
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+========================
+🖥 系统架构要求
+========================
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+请设计清晰的模块划分，例如：
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+- agent/
+- tools/
+- execution/
+- service/
+- controller/
+- dto/
+- logs/
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+并说明每个模块职责。
 
-## License
-For open source projects, say how it is licensed.
+必须体现：
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+- 前后端分离（或轻量UI方案）
+- Agent orchestration 层
+- 工具层与执行层分离
+- 日志系统（用于评估）
+
+========================
+📊 Agent过程可视化（重点）
+========================
+
+系统必须支持用户“看到Agent在行动”，而不是只看到对话。
+
+请设计：
+
+- Step-by-step执行流程展示（Timeline）
+- 每一步包含：Thought / Action / Observation
+- 工具调用状态（如“正在运行代码...”）
+
+说明前端如何展示这些数据（结构即可）
+
+========================
+🧩 多模式支持（关键）
+========================
+
+请设计系统如何支持多种训练模式：
+
+- 算法模式
+- 设计模式
+- 项目模式
+- 重构模式
+
+要求：
+
+- 模式可切换
+- 或由Agent自动选择策略
+- 每种模式的Agent行为不同（说明差异）
+
+========================
+📦 输出要求（非常重要）
+========================
+
+请输出以下内容：
+
+1. 项目整体架构说明（文字）
+2. 目录结构（树状结构）
+3. 核心模块说明（每个模块职责）
+4. Agent核心流程（可用伪代码）
+5. Tool接口设计（示例代码）
+6. Step/Trace数据结构（必须详细）
+7. 多模式设计说明
+8. Agent可视化数据流设计
+
+========================
+⚠️ 重要要求
+========================
+
+- 所有代码/结构必须带有清晰注释（解释用途和设计意图）
+- 不要写完整实现代码（避免过度细节）
+- 强调“可扩展性”和“模块解耦”
+- 保留后续接入评估平台的能力
+- 输出必须结构清晰，适合团队开发使用
+
+========================
+
+请以“架构设计文档 + 框架代码草图”的形式输出。
