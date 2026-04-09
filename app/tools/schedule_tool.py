@@ -12,12 +12,24 @@ def create_schedule(title: str, start_date: str, end_date: str) -> str:
     - start_date: 开始日期 (YYYY-MM-DD)
     - end_date: 结束日期 (YYYY-MM-DD)
     """
-    db = SessionLocal()
-    schedule = Schedule(title=title, start_date=start_date, end_date=end_date)
-    db.add(schedule)
-    db.commit()
-    db.close()
-    return f"日程创建成功: {title} ({start_date} 到 {end_date})"
+    print("\n[DEBUG] create_schedule CALLED")
+
+    with SessionLocal() as db:
+        schedule = Schedule(
+            title=title,
+            start_date=start_date,
+            end_date=end_date
+        )
+        db.add(schedule)
+        db.commit()
+        db.refresh(schedule)  # ✅ 关键
+
+        print(f"[DEBUG] Inserted ID: {schedule.id}")
+
+        all_data = db.query(Schedule).all()
+        print(f"[DEBUG] All schedules after insert: {[(s.id, s.title) for s in all_data]}")
+
+        return f"日程创建成功: {title} ({start_date} 到 {end_date})"
 
 
 @tool
@@ -25,17 +37,26 @@ def get_all_schedules() -> str:
     """
     查询所有学习日程
     """
-    db = SessionLocal()
-    schedules = db.query(Schedule).all()
-    db.close()
+    print("\n[DEBUG] get_all_schedules CALLED")
 
-    if not schedules:
-        return "目前没有任何日程"
+    with SessionLocal() as db:
+        schedules = db.query(Schedule).all()
 
-    lines = []
-    for s in schedules:
-        lines.append(f"[{s.id}] {s.title} ({s.start_date} 到 {s.end_date})")
-    return "\n".join(lines)
+        print(f"[DEBUG] Query result count: {len(schedules)}")
+        print(f"[DEBUG] Data: {[(s.id, s.title) for s in schedules]}")
+
+        if not schedules:
+            return "目前没有任何日程"
+        
+
+        result =  "\n".join(
+            f"[{s.id}] {s.title} ({s.start_date} 到 {s.end_date})"
+            for s in schedules
+        )
+        print(f"[DEBUG] Returning: {result}") 
+
+
+        return result
 
 
 @tool
