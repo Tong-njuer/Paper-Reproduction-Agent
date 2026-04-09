@@ -5,6 +5,7 @@ from app.tools.schedule_tool import create_schedule, get_all_schedules, update_s
 from app.tools.wiki_tool import (
     create_wiki,
     get_all_wikis,
+    search_wiki,
     get_wiki_detail,
     delete_wiki
 )
@@ -13,7 +14,7 @@ import re
 
 ALL_TOOLS = [
     create_schedule, get_all_schedules, update_schedule, delete_schedule,
-    create_wiki, get_all_wikis, get_wiki_detail, delete_wiki
+    create_wiki, get_all_wikis, search_wiki, get_wiki_detail, delete_wiki
 ]
 
 
