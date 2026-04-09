@@ -2,10 +2,19 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from app.core.config import ZHIPU_API_KEY
 from app.tools.schedule_tool import create_schedule, get_all_schedules, update_schedule, delete_schedule
+from app.tools.wiki_tool import (
+    create_wiki,
+    get_all_wikis,
+    get_wiki_detail,
+    delete_wiki
+)
 from app.agent.prompt import SYSTEM_PROMPT
 import re
 
-ALL_TOOLS = [create_schedule, get_all_schedules, update_schedule, delete_schedule]
+ALL_TOOLS = [
+    create_schedule, get_all_schedules, update_schedule, delete_schedule,
+    create_wiki, get_all_wikis, get_wiki_detail, delete_wiki
+]
 
 
 def parse_response(text):
@@ -19,10 +28,12 @@ def parse_response(text):
     2. 再找 Action + Action Input（行动）
     3. 最后找 Final Answer（结束）
     """
-    thought = re.search(r"Thought:(.*)", text)
+    # re.DOTALL 让 . 能匹配换行符，否则多行内容会截断
+    thought = re.search(r"Thought:(.*)", text, re.DOTALL)
     action = re.search(r"Action:(.*)", text)
     action_input = re.search(r"Action Input:(.*)", text)
-    final = re.search(r"Final Answer:(.*)", text)
+    # Final Answer 可能包含多行 markdown，务必加 re.DOTALL
+    final = re.search(r"Final Answer:(.*)", text, re.DOTALL)
 
     return {
         # Thought 可能是多行的，取第一行作为当前推理

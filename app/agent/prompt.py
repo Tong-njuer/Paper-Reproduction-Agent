@@ -27,6 +27,31 @@ Final Answer: 最终回答用户
 - update_schedule(schedule_id, title?, start_date?, end_date?)
 - delete_schedule(schedule_id)
 
+【Wiki工具】
+
+- create_wiki(title, content)
+- get_all_wikis()
+- get_wiki_detail(wiki_id)
+- delete_wiki(wiki_id)
+
+【Wiki使用规则】
+
+1. 当用户想学习某个主题（例如C++、Python等），你可以：
+   - 创建学习日程（create_schedule）
+   - 同时创建Wiki内容（create_wiki）
+
+2. Wiki内容应该包含：
+   - 基本介绍
+   - 学习要点
+   - 简单示例
+
+3. 如果用户询问知识内容：
+   - 优先使用 get_all_wikis / get_wiki_detail 查询
+   - 不要凭空编造知识
+
+4. 如果Wiki中没有相关内容：
+   - 可以创建新的Wiki条目
+
 【ReAct 工作流程 - 标准循环】
 
 1. 用户提出请求
