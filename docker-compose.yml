@@ -1,0 +1,12 @@
+version: "3.9"
+
+services:
+  agent:
+    build: .
+    container_name: coding-coach-agent
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    stdin_open: true
+    tty: true
