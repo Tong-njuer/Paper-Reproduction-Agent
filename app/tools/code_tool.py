@@ -14,14 +14,33 @@ from langchain_openai import ChatOpenAI
 from app.db.database import SessionLocal
 from app.db.models import CodeProblem, UserCodeAnswer, UserAbility
 from app.core.config import ZHIPU_API_KEY
+from app.core.context import get_current_user_id
 
-# Workspace 目录
+# Workspace 目录（用户隔离）
 WORKSPACE_DIR = Path(__file__).parent.parent.parent / "workspace"
+
+
+def _get_user_workspace() -> Path:
+    """获取当前用户的工作目录"""
+    user_id = get_current_user_id()
+    if not user_id:
+        return None
+    user_dir = WORKSPACE_DIR / f"user_{user_id}"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    return user_dir
 
 
 def _ensure_workspace():
     """确保 workspace 目录存在"""
     WORKSPACE_DIR.mkdir(exist_ok=True)
+
+
+def _check_user():
+    """检查用户是否登录"""
+    user_id = get_current_user_id()
+    if not user_id:
+        return None, "用户未登录"
+    return user_id, None
 
 
 def _get_llm():
@@ -34,13 +53,13 @@ def _get_llm():
     )
 
 
-def _get_or_create_user_ability() -> UserAbility:
-    """获取或创建用户能力画像（单用户模式，id=1）"""
+def _get_or_create_user_ability(user_id: int) -> UserAbility:
+    """获取或创建用户能力画像"""
     with SessionLocal() as db:
-        ability = db.query(UserAbility).filter(UserAbility.id == 1).first()
+        ability = db.query(UserAbility).filter(UserAbility.user_id == user_id).first()
         if not ability:
             ability = UserAbility(
-                id=1,
+                user_id=user_id,
                 ability_tags=json.dumps({}),
                 total_attempted=0,
                 total_solved=0,
@@ -52,9 +71,9 @@ def _get_or_create_user_ability() -> UserAbility:
         return ability
 
 
-def _update_ability_tags(problem_tags: list, is_correct: bool):
+def _update_ability_tags(user_id: int, problem_tags: list, is_correct: bool):
     """根据答题结果更新用户能力标签"""
-    ability = _get_or_create_user_ability()
+    ability = _get_or_create_user_ability(user_id)
     current_tags = json.loads(ability.ability_tags or "{}")
 
     for tag in problem_tags:
@@ -76,7 +95,7 @@ def _update_ability_tags(problem_tags: list, is_correct: bool):
     ability.updated_at = datetime.now().isoformat()
 
     with SessionLocal() as db:
-        db_ab = db.query(UserAbility).filter(UserAbility.id == 1).first()
+        db_ab = db.query(UserAbility).filter(UserAbility.user_id == user_id).first()
         db_ab.ability_tags = ability.ability_tags
         db_ab.total_attempted = ability.total_attempted
         db_ab.total_solved = ability.total_solved
@@ -106,6 +125,10 @@ def create_code_problem(
     """
     print("\n[DEBUG] create_code_problem CALLED")
 
+    user_id, err = _check_user()
+    if err:
+        return err
+
     try:
         tags_list = json.loads(tags) if isinstance(tags, str) else tags
     except:
@@ -118,6 +141,7 @@ def create_code_problem(
 
     with SessionLocal() as db:
         problem = CodeProblem(
+            user_id=user_id,
             title=title,
             description=description,
             difficulty=difficulty,
@@ -131,8 +155,9 @@ def create_code_problem(
 
         print(f"[DEBUG] Problem created: ID={problem.id}, title={title}")
 
-    # 生成 workspace 文件
+    # 生成用户隔离的 workspace 文件
     _ensure_workspace()
+    user_workspace = _get_user_workspace()
     test_cases_md = "\n".join(
         f"- 用例{i}: 输入: {tc.get('input', 'N/A')} → 期望输出: {tc.get('expected', 'N/A')}"
         for i, tc in enumerate(test_cases_list, 1)
@@ -170,7 +195,7 @@ def create_code_problem(
 *此文件由编程教练Agent自动生成 - 请在此文件编写代码，完成后对我说"提交第{problem.id}题答案"*
 """
 
-    workspace_file = WORKSPACE_DIR / f"problem_{problem.id}.md"
+    workspace_file = user_workspace / f"problem_{problem.id}.md"
     with open(workspace_file, "w", encoding="utf-8") as f:
         f.write(workspace_content)
 
@@ -189,8 +214,12 @@ def list_code_problems() -> str:
     """
     print("\n[DEBUG] list_code_problems CALLED")
 
+    user_id, err = _check_user()
+    if err:
+        return err
+
     with SessionLocal() as db:
-        problems = db.query(CodeProblem).all()
+        problems = db.query(CodeProblem).filter(CodeProblem.user_id == user_id).all()
 
         if not problems:
             return "目前没有任何代码题目"
@@ -215,8 +244,15 @@ def get_problem_detail(problem_id: int) -> str:
     """
     print(f"\n[DEBUG] get_problem_detail CALLED, problem_id={problem_id}")
 
+    user_id, err = _check_user()
+    if err:
+        return err
+
     with SessionLocal() as db:
-        problem = db.query(CodeProblem).filter(CodeProblem.id == problem_id).first()
+        problem = db.query(CodeProblem).filter(
+            CodeProblem.id == problem_id,
+            CodeProblem.user_id == user_id
+        ).first()
 
         if not problem:
             return f"未找到ID为 {problem_id} 的题目"
@@ -249,8 +285,13 @@ def submit_and_grade_code(problem_id: int) -> str:
     """
     print(f"\n[DEBUG] submit_and_grade_code CALLED, problem_id={problem_id}")
 
-    # 从 workspace 文件读取用户代码
-    workspace_file = WORKSPACE_DIR / f"problem_{problem_id}.md"
+    user_id, err = _check_user()
+    if err:
+        return err
+
+    # 从用户workspace文件读取用户代码
+    user_workspace = _get_user_workspace()
+    workspace_file = user_workspace / f"problem_{problem_id}.md"
     if not workspace_file.exists():
         return f"未找到题目文件: {workspace_file}，请确认题目ID是否正确"
 
@@ -270,7 +311,10 @@ def submit_and_grade_code(problem_id: int) -> str:
         return "未在文件中找到你编写的代码，请确认已在 workspace 文件的【你的代码】区块中填写代码"
 
     with SessionLocal() as db:
-        problem = db.query(CodeProblem).filter(CodeProblem.id == problem_id).first()
+        problem = db.query(CodeProblem).filter(
+            CodeProblem.id == problem_id,
+            CodeProblem.user_id == user_id
+        ).first()
 
         if not problem:
             return f"未找到ID为 {problem_id} 的题目"
@@ -346,9 +390,9 @@ def submit_and_grade_code(problem_id: int) -> str:
         }
 
     is_correct = grading_json.get("is_correct", False)
-    tags_before_update = json.loads(_get_or_create_user_ability().ability_tags or "{}")
+    tags_before_update = json.loads(_get_or_create_user_ability(user_id).ability_tags or "{}")
 
-    new_tags = _update_ability_tags(tags, is_correct)
+    new_tags = _update_ability_tags(user_id, tags, is_correct)
 
     tags_diff = {}
     for tag, level in new_tags.items():
@@ -359,6 +403,7 @@ def submit_and_grade_code(problem_id: int) -> str:
             tags_diff[tag] = f"新增: {level}"
 
     answer_record = UserCodeAnswer(
+        user_id=user_id,
         problem_id=problem_id,
         user_code=user_code,
         evaluation=json.dumps(grading_json, ensure_ascii=False),
@@ -405,7 +450,11 @@ def get_user_ability_profile() -> str:
     """
     print("\n[DEBUG] get_user_ability_profile CALLED")
 
-    ability = _get_or_create_user_ability()
+    user_id, err = _check_user()
+    if err:
+        return err
+
+    ability = _get_or_create_user_ability(user_id)
 
     tags = json.loads(ability.ability_tags or "{}")
 

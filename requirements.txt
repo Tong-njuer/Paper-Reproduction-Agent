@@ -5,3 +5,4 @@ langchain-community==0.3.28
 python-dotenv
 sqlalchemy
 pydantic
+streamlit

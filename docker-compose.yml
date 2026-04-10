@@ -6,7 +6,9 @@ services:
     container_name: coding-coach-agent
     env_file:
       - .env
+    ports:
+      - "8501:8501"
     volumes:
-      - .:/app
+      - ./workspace:/app/workspace
     stdin_open: true
     tty: true

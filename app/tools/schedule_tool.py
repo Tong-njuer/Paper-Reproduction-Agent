@@ -1,6 +1,15 @@
 from langchain.tools import tool
 from app.db.database import SessionLocal
 from app.db.models import Schedule
+from app.core.context import get_current_user_id
+
+
+def _check_user():
+    """检查用户是否登录"""
+    user_id = get_current_user_id()
+    if not user_id:
+        return None, "用户未登录"
+    return user_id, None
 
 
 @tool
@@ -14,19 +23,24 @@ def create_schedule(title: str, start_date: str, end_date: str) -> str:
     """
     print("\n[DEBUG] create_schedule CALLED")
 
+    user_id, err = _check_user()
+    if err:
+        return err
+
     with SessionLocal() as db:
         schedule = Schedule(
+            user_id=user_id,
             title=title,
             start_date=start_date,
             end_date=end_date
         )
         db.add(schedule)
         db.commit()
-        db.refresh(schedule)  # ✅ 关键
+        db.refresh(schedule)
 
         print(f"[DEBUG] Inserted ID: {schedule.id}")
 
-        all_data = db.query(Schedule).all()
+        all_data = db.query(Schedule).filter(Schedule.user_id == user_id).all()
         print(f"[DEBUG] All schedules after insert: {[(s.id, s.title) for s in all_data]}")
 
         return f"日程创建成功: {title} ({start_date} 到 {end_date})"
@@ -39,21 +53,25 @@ def get_all_schedules() -> str:
     """
     print("\n[DEBUG] get_all_schedules CALLED")
 
+    user_id, err = _check_user()
+    if err:
+        return err
+
     with SessionLocal() as db:
-        schedules = db.query(Schedule).all()
+        schedules = db.query(Schedule).filter(Schedule.user_id == user_id).all()
 
         print(f"[DEBUG] Query result count: {len(schedules)}")
         print(f"[DEBUG] Data: {[(s.id, s.title) for s in schedules]}")
 
         if not schedules:
             return "目前没有任何日程"
-        
+
 
         result =  "\n".join(
             f"[{s.id}] {s.title} ({s.start_date} 到 {s.end_date})"
             for s in schedules
         )
-        print(f"[DEBUG] Returning: {result}") 
+        print(f"[DEBUG] Returning: {result}")
 
 
         return result
@@ -69,8 +87,15 @@ def update_schedule(schedule_id: int, title: str | None = None, start_date: str 
     - start_date: 新开始日期（可选，YYYY-MM-DD）
     - end_date: 新结束日期（可选，YYYY-MM-DD）
     """
+    user_id, err = _check_user()
+    if err:
+        return err
+
     db = SessionLocal()
-    schedule = db.query(Schedule).filter(Schedule.id == schedule_id).first()
+    schedule = db.query(Schedule).filter(
+        Schedule.id == schedule_id,
+        Schedule.user_id == user_id
+    ).first()
     if not schedule:
         db.close()
         return f"未找到ID为 {schedule_id} 的日程"
@@ -83,7 +108,6 @@ def update_schedule(schedule_id: int, title: str | None = None, start_date: str 
         schedule.end_date = end_date
 
     db.commit()
-    # commit后对象已expired，必须在close前读取所有需要用的属性
     _title = schedule.title
     _start = schedule.start_date
     _end = schedule.end_date
@@ -98,8 +122,15 @@ def delete_schedule(schedule_id: int) -> str:
     参数:
     - schedule_id: 日程ID（必填）
     """
+    user_id, err = _check_user()
+    if err:
+        return err
+
     db = SessionLocal()
-    schedule = db.query(Schedule).filter(Schedule.id == schedule_id).first()
+    schedule = db.query(Schedule).filter(
+        Schedule.id == schedule_id,
+        Schedule.user_id == user_id
+    ).first()
     if not schedule:
         db.close()
         return f"未找到ID为 {schedule_id} 的日程"

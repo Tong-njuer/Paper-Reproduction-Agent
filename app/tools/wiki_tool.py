@@ -17,7 +17,8 @@ from langchain.tools import tool
 from sqlalchemy import Column, Integer, String, Text, Float
 
 from app.db.database import SessionLocal, engine
-from app.db.models import Base, Wiki
+from app.db.models import Base, Wiki, WikiVector
+from app.core.context import get_current_user_id
 
 # ========== Embedding 配置 ==========
 ZHIPU_API_KEY = os.getenv("ZHIPU_API_KEY")
@@ -42,24 +43,19 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 
-# ========== SQL 表定义（存储 wiki 的向量） ==========
-
-class WikiVector(Base):
-    """Wiki 向量表：存储每个 wiki 的标题+内容合并后的 embedding"""
-    __tablename__ = "wiki_vectors"
-
-    id = Column(Integer, primary_key=True, index=True)
-    wiki_id = Column(Integer, unique=True, index=True)
-    title = Column(String)
-    content = Column(Text)
-    embedding = Column(Text)  # JSON 序列化的 float 列表
-
-
 # ========== 初始化表 ==========
 
 def _ensure_tables():
     """确保 wiki_vectors 表存在。"""
     Base.metadata.create_all(bind=engine)
+
+
+def _check_user():
+    """检查用户是否登录"""
+    user_id = get_current_user_id()
+    if not user_id:
+        return None, "用户未登录"
+    return user_id, None
 
 
 # ========== 工具实现 ==========
@@ -75,11 +71,15 @@ def create_wiki(title: str, content: str) -> str:
     """
     print("\n[DEBUG] create_wiki CALLED")
 
+    user_id, err = _check_user()
+    if err:
+        return err
+
     _ensure_tables()
 
     # 1. 存入 SQL 数据库
     with SessionLocal() as db:
-        wiki = Wiki(title=title, content=content)
+        wiki = Wiki(user_id=user_id, title=title, content=content)
         db.add(wiki)
         db.commit()
         db.refresh(wiki)
@@ -92,6 +92,7 @@ def create_wiki(title: str, content: str) -> str:
 
         with SessionLocal() as db:
             vec = WikiVector(
+                user_id=user_id,
                 wiki_id=wiki_id,
                 title=title,
                 content=content,
@@ -117,15 +118,19 @@ def search_wiki(query: str, top_k: int = 3) -> str:
     """
     print(f"\n[DEBUG] search_wiki CALLED, query={query}, top_k={top_k}")
 
+    user_id, err = _check_user()
+    if err:
+        return err
+
     _ensure_tables()
 
     try:
         # 1. 把 query 转成向量
         query_vec = get_embedding(query)
 
-        # 2. 从数据库加载所有 wiki 向量
+        # 2. 从数据库加载当前用户的 wiki 向量
         with SessionLocal() as db:
-            vectors = db.query(WikiVector).all()
+            vectors = db.query(WikiVector).filter(WikiVector.user_id == user_id).all()
 
         if not vectors:
             return "Wiki 知识库为空，请先创建 Wiki 内容。"
@@ -162,8 +167,12 @@ def get_all_wikis() -> str:
     """获取所有 Wiki 条目（仅标题列表）。"""
     print("\n[DEBUG] get_all_wikis CALLED")
 
+    user_id, err = _check_user()
+    if err:
+        return err
+
     with SessionLocal() as db:
-        wikis = db.query(Wiki).all()
+        wikis = db.query(Wiki).filter(Wiki.user_id == user_id).all()
 
         if not wikis:
             return "目前没有任何Wiki内容"
@@ -177,8 +186,15 @@ def get_all_wikis() -> str:
 @tool
 def delete_wiki(wiki_id: int) -> str:
     """删除一个 Wiki 条目（同时删除 SQL 数据和向量）。"""
+    user_id, err = _check_user()
+    if err:
+        return err
+
     with SessionLocal() as db:
-        wiki = db.query(Wiki).filter(Wiki.id == wiki_id).first()
+        wiki = db.query(Wiki).filter(
+            Wiki.id == wiki_id,
+            Wiki.user_id == user_id
+        ).first()
         if not wiki:
             return f"未找到ID为 {wiki_id} 的Wiki"
 
@@ -186,7 +202,10 @@ def delete_wiki(wiki_id: int) -> str:
         db.delete(wiki)
 
         # 同时删除向量
-        vec = db.query(WikiVector).filter(WikiVector.wiki_id == wiki_id).first()
+        vec = db.query(WikiVector).filter(
+            WikiVector.wiki_id == wiki_id,
+            WikiVector.user_id == user_id
+        ).first()
         if vec:
             db.delete(vec)
 
@@ -204,8 +223,15 @@ def get_wiki_detail(wiki_id: int) -> str:
     """
     print(f"\n[DEBUG] get_wiki_detail CALLED, wiki_id={wiki_id}")
 
+    user_id, err = _check_user()
+    if err:
+        return err
+
     with SessionLocal() as db:
-        wiki = db.query(Wiki).filter(Wiki.id == wiki_id).first()
+        wiki = db.query(Wiki).filter(
+            Wiki.id == wiki_id,
+            Wiki.user_id == user_id
+        ).first()
 
         if not wiki:
             return f"未找到ID为 {wiki_id} 的Wiki"

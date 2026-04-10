@@ -16,6 +16,15 @@ from app.tools.code_tool import (
     submit_and_grade_code,
     get_user_ability_profile
 )
+from app.tools.learning_path_tool import (
+    create_learning_path,
+    start_learning_path,
+    complete_current_step,
+    get_learning_path_progress,
+    list_learning_paths,
+    get_learning_path_detail,
+    recommend_next_learning
+)
 from app.agent.prompt import SYSTEM_PROMPT
 import re
 
@@ -23,7 +32,10 @@ ALL_TOOLS = [
     create_schedule, get_all_schedules, update_schedule, delete_schedule,
     create_wiki, get_all_wikis, search_wiki, get_wiki_detail, delete_wiki,
     create_code_problem, list_code_problems, get_problem_detail,
-    submit_and_grade_code, get_user_ability_profile
+    submit_and_grade_code, get_user_ability_profile,
+    create_learning_path, start_learning_path, complete_current_step,
+    get_learning_path_progress, list_learning_paths, get_learning_path_detail,
+    recommend_next_learning
 ]
 
 
