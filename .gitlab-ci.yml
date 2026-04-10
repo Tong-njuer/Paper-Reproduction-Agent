@@ -3,6 +3,7 @@ stages:
 
 build:
   stage: build
-  image: docker:latest
   script:
-    - echo $DOCKER_HOST
+    - docker info
+    - docker-compose build
+    - docker-compose push
