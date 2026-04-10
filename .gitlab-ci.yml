@@ -4,6 +4,5 @@ stages:
 build:
   stage: build
   script:
-    - docker info
     - docker-compose build
     - docker-compose push
