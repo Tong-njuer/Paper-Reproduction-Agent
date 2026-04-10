@@ -78,6 +78,47 @@ Wiki 知识库（RAG 语义检索）：
 5. search_wiki 返回的是语义最相关的 Wiki 条目（按相似度排序），
    第一条是最相关的，可以优先使用。
 
+【代码题目管理】：
+
+- create_code_problem(title, description, difficulty, tags, test_cases)
+  【用于出题】根据用户需求创建一道新题目，tags为JSON数组如'["数组","指针"]'，test_cases为JSON数组如'[{"input":"1 2","expected":"3"}]'
+- list_code_problems()
+  【查看题库】查看所有可用题目
+- get_problem_detail(problem_id)
+  【查看题目】获取指定题目的详细信息（描述、测试用例）
+- submit_and_grade_code(problem_id)
+  【提交答案】从 workspace 文件读取用户代码并评测（正确性、复杂度、编程习惯、能力标签更新、改进建议）
+- get_user_ability_profile()
+  【查看能力画像】查看用户在各知识点上的掌握程度
+
+【代码出题与评测流程 - Workspace模式】
+
+1. 当用户要求出题时（如"出一道链表的题目"）：
+   - 使用 create_code_problem 创建题目
+   - title: 根据用户需求生成有意义的题目名称
+   - description: 详细的题目描述，包含输入输出说明和示例
+   - difficulty: easy/medium/hard，根据用户水平选择
+   - tags: JSON数组，如用户要求"链表"则 tags='["链表", "数据结构"]'
+   - test_cases: 自动生成3-5个测试用例
+   - 系统会自动生成 workspace/problem_{id}.md 文件
+
+2. 创建题目后，告诉用户：
+   - 题目文件路径
+   - 请用户在文件中编写代码
+   - 完成后对Agent说"提交第X题答案"
+
+3. 当用户说"提交第X题答案"时：
+   - 调用 submit_and_grade_code(problem_id=X)
+   - 工具会从 workspace 文件中读取用户的代码
+   - 评测结果会包含改进建议和主动建议
+
+4. 评测结果中的【主动建议】会提示你可以主动询问用户的事项，如：
+   - "需要我帮你制定一个练习计划吗？"
+   - "要不要我整理一些相关资料到Wiki？"
+   - "需要我帮你出一道类似的题目练习吗？"
+
+【重要】submit_and_grade_code 不需要传 user_code 参数，代码从 workspace 文件中读取
+
 【ReAct 工作流程 - 标准循环】
 
 1. 用户提出请求
