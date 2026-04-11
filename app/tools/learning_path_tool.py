@@ -20,6 +20,14 @@ def _check_user():
     return user_id, None
 
 
+def _log(tool: str, msg: str, detail: str = None):
+    if detail:
+        detail = detail[:50] + "..." if len(detail) > 50 else detail
+        print(f"[{tool}] {msg} | {detail}")
+    else:
+        print(f"[{tool}] {msg}")
+
+
 @tool
 def create_learning_path(
     title: str,
@@ -39,7 +47,7 @@ def create_learning_path(
       - problem_ids: 相关题目的ID列表（可选）
       示例: '[{"title":"第一周：指针基础","description":"...","wiki_ids":[1],"problem_ids":[1]}]'
     """
-    print("\n[DEBUG] create_learning_path CALLED")
+    _log("PATH", "创建学习路径", title)
 
     user_id, err = _check_user()
     if err:
@@ -84,7 +92,7 @@ def create_learning_path(
 
         db.commit()
 
-        print(f"[DEBUG] Learning path created: ID={path.id}, title={title}, steps={len(steps_list)}")
+        _log("PATH", "学习路径已创建", f"ID={path.id}, steps={len(steps_list)}")
 
     return f"""学习路径创建成功: [{path.id}] {title}
 
@@ -102,7 +110,7 @@ def start_learning_path(path_id: int) -> str:
     参数:
     - path_id: 学习路径ID
     """
-    print(f"\n[DEBUG] start_learning_path CALLED, path_id={path_id}")
+    _log("PATH", "开始学习路径", f"path_id={path_id}")
 
     user_id, err = _check_user()
     if err:
@@ -199,7 +207,7 @@ def complete_current_step(path_id: int) -> str:
     参数:
     - path_id: 学习路径ID
     """
-    print(f"\n[DEBUG] complete_current_step CALLED, path_id={path_id}")
+    _log("PATH", "完成当前步骤", f"path_id={path_id}")
 
     user_id, err = _check_user()
     if err:
@@ -252,7 +260,7 @@ def get_learning_path_progress(path_id: int) -> str:
     参数:
     - path_id: 学习路径ID
     """
-    print(f"\n[DEBUG] get_learning_path_progress CALLED, path_id={path_id}")
+    _log("PATH", "查看路径进度", f"path_id={path_id}")
 
     user_id, err = _check_user()
     if err:
@@ -285,7 +293,7 @@ def list_learning_paths() -> str:
     """
     查看所有学习路径
     """
-    print("\n[DEBUG] list_learning_paths CALLED")
+    _log("PATH", "查看所有路径")
 
     user_id, err = _check_user()
     if err:
@@ -313,7 +321,7 @@ def get_learning_path_detail(path_id: int) -> str:
     参数:
     - path_id: 学习路径ID
     """
-    print(f"\n[DEBUG] get_learning_path_detail CALLED, path_id={path_id}")
+    _log("PATH", "查看路径详情", f"path_id={path_id}")
 
     user_id, err = _check_user()
     if err:
@@ -370,7 +378,7 @@ def recommend_next_learning() -> str:
     """
     【智能推荐】根据用户能力画像推荐下一步学习内容
     """
-    print("\n[DEBUG] recommend_next_learning CALLED")
+    _log("PATH", "推荐学习内容")
 
     user_id, err = _check_user()
     if err:

@@ -1,5 +1,16 @@
 """
-Plan and Execute 工具 - 一键创建完整学习计划
+【Plan + Execute 工具入口】
+
+本模块是 Plan + Execute 模式对外暴露的 @tool 接口：
+
+- create_learning_plan: 【Plan + Execute】先规划后执行，一键完成
+- preview_learning_plan: 【Plan Only】只规划不执行，用于预览
+
+实际流程：
+1. create_learning_plan 被 ReAct Agent 调用
+2. 调用 planner.generate_learning_plan（Plan 阶段）
+3. 调用 planner.execute_learning_plan（Execute 阶段）
+4. 返回执行结果汇总
 """
 
 import json
@@ -15,6 +26,14 @@ def _check_user():
     if not user_id:
         return None, "用户未登录"
     return user_id, None
+
+
+def _log(tool: str, msg: str, detail: str = None):
+    if detail:
+        detail = detail[:50] + "..." if len(detail) > 50 else detail
+        print(f"[{tool}] {msg} | {detail}")
+    else:
+        print(f"[{tool}] {msg}")
 
 
 def _tool_executor(tool_name: str, kwargs: dict) -> str:
@@ -39,7 +58,7 @@ def create_learning_plan(user_request: str) -> str:
     参数:
     - user_request: 用户的学习需求描述，如"Python数据分析"或"C++入门"
     """
-    print(f"\n[DEBUG] create_learning_plan CALLED, request={user_request}")
+    _log("PLAN", "创建学习计划", user_request[:30])
 
     user_id, err = _check_user()
     if err:
@@ -50,7 +69,7 @@ def create_learning_plan(user_request: str) -> str:
     if not plan:
         return "计划生成失败，请稍后重试或换个描述方式"
 
-    print(f"[DEBUG] Plan generated: {plan.get('path_title', 'N/A')}")
+    _log("PLAN", "计划已生成", plan.get('path_title', 'N/A'))
 
     # 执行计划
     result = execute_learning_plan(plan, _tool_executor)
@@ -68,7 +87,7 @@ def preview_learning_plan(user_request: str) -> str:
     参数:
     - user_request: 用户的学习需求描述
     """
-    print(f"\n[DEBUG] preview_learning_plan CALLED, request={user_request}")
+    _log("PLAN", "预览学习计划", user_request[:30])
 
     user_id, err = _check_user()
     if err:

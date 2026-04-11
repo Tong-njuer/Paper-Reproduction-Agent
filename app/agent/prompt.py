@@ -129,6 +129,18 @@ Wiki 知识库（RAG 语义检索）：
 
 【重要】submit_and_grade_code 不需要传 user_code 参数，代码从 workspace 文件中读取
 
+【评测结果输出规则】
+- submit_and_grade_code 返回的评测结果包含多行内容（【评测结果】【复杂度】【代码风格】【改进建议】等章节）
+- 在 Final Answer 中，用以下格式直接输出：先写一行 "Final Answer:"，然后换行粘贴工具返回的完整原文
+- **不要把多行内容压缩成一段**，保持原有的换行结构
+- 示例格式：
+  Final Answer:
+  【评测结果】
+  ✅ 通过 - ...
+  📊 复杂度: ...
+  【改进建议】
+  • 建议1
+
 【学习路径管理】：
 
 - create_learning_path(title, description, steps)

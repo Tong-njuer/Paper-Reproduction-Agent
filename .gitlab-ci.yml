@@ -4,7 +4,8 @@ stages:
 build:
   stage: build
   script:
-    - docker info
-    - docker-compose build
+    - docker-compose down --remove-orphans
+    - docker-compose build --no-cache
     - docker-compose push
-    - docker-compose up
+    - docker-compose up -d --force-recreate
+    - docker image prune -f

@@ -1,6 +1,18 @@
 """
-Planner Agent - 学习计划规划器
-使用 Plan + Execute 模式，让 Agent 创建学习路径时自动完成日程、Wiki、题目
+【Plan + Execute 模式 - 规划器】
+
+本模块实现 Plan + Execute 架构：
+1. Plan（规划阶段）：LLM 生成完整的学习计划（不执行）
+2. Execute（执行阶段）：按计划顺序执行所有工具调用
+
+对比 ReAct：
+- ReAct：边想边做，适合单步决策
+- Plan+Execute：先想好再做，适合多步骤复杂任务
+
+使用场景：
+- 用户说"我想要Python学习路径"
+- create_learning_plan 工具调用 generate_learning_plan（Plan）
+- 然后调用 execute_learning_plan（Execute）
 """
 
 import json
@@ -10,6 +22,14 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.core.config import ZHIPU_API_KEY
+
+
+def _log(msg: str, detail: str = None):
+    if detail:
+        detail = detail[:50] + "..." if len(detail) > 50 else detail
+        print(f"[PLAN] {msg} | {detail}")
+    else:
+        print(f"[PLAN] {msg}")
 
 
 PLANNER_PROMPT = """你是一个学习计划规划专家。当用户说想要学习某个主题时，你需要为他规划一个完整的编程学习路径。
@@ -138,7 +158,7 @@ def execute_learning_plan(plan: dict, tool_executor) -> str:
                 "end_date": end
             })
             results["schedules"].append(result)
-            print(f"[PLAN] Created schedule: {title}")
+            _log("Created schedule", title)
 
             # 从结果中提取 schedule_id（如果工具返回了的话）
             import re
@@ -158,7 +178,7 @@ def execute_learning_plan(plan: dict, tool_executor) -> str:
                 "content": content
             })
             results["wikis"].append(result)
-            print(f"[PLAN] Created wiki: {title}")
+            _log("Created wiki", title)
 
             wid_match = re.search(r"Wiki创建成功: \[(\d+)\]", result)
             if wid_match:
@@ -179,7 +199,7 @@ def execute_learning_plan(plan: dict, tool_executor) -> str:
                 "test_cases": json.dumps(test_cases)
             })
             results["problems"].append(result)
-            print(f"[PLAN] Created problem: {prob_data.get('title', '')}")
+            _log("Created problem", prob_data.get('title', ''))
 
             pid_match = re.search(r"题目创建成功: \[(\d+)\]", result)
             if pid_match:
@@ -201,7 +221,7 @@ def execute_learning_plan(plan: dict, tool_executor) -> str:
         "steps": json.dumps(steps_for_path)
     })
     results["path_id"] = path_result
-    print(f"[PLAN] Created learning path")
+    _log("Created learning path")
 
     return _format_plan_summary(plan, results)
 

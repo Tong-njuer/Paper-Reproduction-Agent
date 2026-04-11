@@ -1,5 +1,19 @@
 """
 代码题目工具 - 包含题目创建、代码评测、用户能力画像等功能
+
+【Agent 模式说明】
+
+1. ReAct（app/agent/agent.py）：
+   - 用于常规对话、Wiki 问答、日程管理等
+   - 边想边做，单步决策
+
+2. Plan + Execute（app/agent/planner.py + app/tools/plan_and_execute_tool.py）：
+   - 用于创建学习路径
+   - 先规划（Plan）再执行（Execute）
+
+3. Reflection（app/tools/code_tool.py 的 _reflect_on_grading）：
+   - 用于代码评测后反思
+   - 检查评测是否公平、建议是否可操作
 """
 
 import json
@@ -15,6 +29,15 @@ from app.db.database import SessionLocal
 from app.db.models import CodeProblem, UserCodeAnswer, UserAbility
 from app.core.config import ZHIPU_API_KEY
 from app.core.context import get_current_user_id
+
+# ========== 简洁日志 ==========
+def _log(tool: str, msg: str, detail: str = None):
+    """简化日志：工具名 + 消息 [+ 详情截断]"""
+    if detail:
+        detail = detail[:50] + "..." if len(detail) > 50 else detail
+        print(f"[{tool}] {msg} | {detail}")
+    else:
+        print(f"[{tool}] {msg}")
 
 # Workspace 目录（用户隔离）
 WORKSPACE_DIR = Path(__file__).parent.parent.parent / "workspace"
@@ -51,6 +74,80 @@ def _get_llm():
         openai_api_base="https://open.bigmodel.cn/api/paas/v4",
         temperature=0.3
     )
+
+
+def _reflect_on_grading(problem_title: str, user_code: str, grading_json: dict) -> dict:
+    """
+    【Reflection 反思步骤】
+
+    在初步评测完成后，让 LLM 反思评测结果是否合理、完整、有遗漏。
+
+    反思流程：
+    1. LLM 重新审视评测结果（不只看对错，还要看评价质量）
+    2. 检查是否有遗漏、评价是否公平、建议是否可操作
+    3. 如果发现问题，修正 grading_json
+
+    反思维度：
+    1. 评价是否公平？有没有误判？
+    2. 改进建议是否具体可操作？
+    3. 是否有遗漏的错误类型或潜在问题？
+    4. 推荐的资源是否合适？
+    """
+    reflection_prompt = f"""你是一个代码评测质量审核员。请反思以下评测结果是否合理。
+
+【题目信息】
+标题: {problem_title}
+
+【用户提交的代码】
+{user_code}
+
+【初步评测结果】
+{json.dumps(grading_json, ensure_ascii=False, indent=2)}
+
+【反思要求】
+请检查以下方面：
+1. **公平性**: 这个评价是否公平？有没有漏检的错误？
+2. **完整性**: 是否有遗漏的潜在问题（如代码虽能跑但有安全隐患）？
+3. **可操作性**: 改进建议是否具体可执行？还是太笼统？
+4. **教学价值**: 评价和建議是否能帮助用户真正理解和改进？
+
+请以JSON格式返回反思结果：
+{{
+    "is_fair": true或false,
+    "concerns": "如果有任何问题，说明原因",
+    "missing_issues": ["遗漏的问题1", "问题2"]（如果没有则为空数组）,
+    "improved_suggestions": ["改进的建议1", "改进的建议2"]（如果原建议足够好则沿用）,
+    "reflection_summary": "一段总结性的话，指出评测质量如何、是否需要修正"
+}}
+
+如果评测结果已经很合理，返回：
+{{
+    "is_fair": true,
+    "concerns": "",
+    "missing_issues": [],
+    "improved_suggestions": [],
+    "reflection_summary": "评测结果公平合理，无需修正。"
+}}
+"""
+
+    try:
+        llm = _get_llm()
+        response = llm.invoke(reflection_prompt)
+        reflection_result = response.content.strip()
+
+        json_match = re.search(r"\{[\s\S]*\}", reflection_result)
+        if json_match:
+            return json.loads(json_match.group())
+    except Exception as e:
+        _log("REFLECT", "反思失败", str(e))
+
+    return {
+        "is_fair": True,
+        "concerns": "",
+        "missing_issues": [],
+        "improved_suggestions": [],
+        "reflection_summary": "反思步骤执行失败，沿用原评测结果。"
+    }
 
 
 def _get_or_create_user_ability(user_id: int) -> UserAbility:
@@ -165,7 +262,7 @@ def create_code_problem(
     - tags: 题目标签，JSON数组格式，如 '["数组", "链表"]'
     - test_cases: 测试用例，JSON数组格式，如 '[{"input": "1 2", "expected": "3"}]'
     """
-    print("\n[DEBUG] create_code_problem CALLED")
+    _log("CODE", "创建题目", title)
 
     user_id, err = _check_user()
     if err:
@@ -195,7 +292,7 @@ def create_code_problem(
         db.commit()
         db.refresh(problem)
 
-        print(f"[DEBUG] Problem created: ID={problem.id}, title={title}")
+        _log("CODE", f"题目已创建 ID={problem.id}", title)
 
     # 生成用户隔离的 workspace 文件
     _ensure_workspace()
@@ -241,7 +338,7 @@ def create_code_problem(
     with open(workspace_file, "w", encoding="utf-8") as f:
         f.write(workspace_content)
 
-    print(f"[DEBUG] Workspace file created: {workspace_file}")
+    _log("CODE", "工作文件已创建", str(workspace_file))
 
     return f"""题目创建成功: [{problem.id}] {title} (难度: {difficulty}, 标签: {tags_list})
 
@@ -254,7 +351,7 @@ def list_code_problems() -> str:
     """
     查询所有可用的代码题目
     """
-    print("\n[DEBUG] list_code_problems CALLED")
+    _log("CODE", "查看题库")
 
     user_id, err = _check_user()
     if err:
@@ -284,7 +381,7 @@ def get_problem_detail(problem_id: int) -> str:
     参数:
     - problem_id: 题目ID
     """
-    print(f"\n[DEBUG] get_problem_detail CALLED, problem_id={problem_id}")
+    _log("CODE", "查看题目详情", f"ID={problem_id}")
 
     user_id, err = _check_user()
     if err:
@@ -320,12 +417,19 @@ def get_problem_detail(problem_id: int) -> str:
 @tool
 def submit_and_grade_code(problem_id: int) -> str:
     """
-    提交代码并获取评测结果（从 workspace 文件读取用户代码）
+    【代码评测 + Reflection】
+
+    流程：
+    1. 从 workspace 文件读取用户代码
+    2. 调用 LLM 进行初步评测（ReAct-like）
+    3. 【Reflection 反思】LLM 反思评测结果是否公平合理
+    4. 更新用户能力画像
+    5. 返回评测结果（含反思补充）
 
     参数:
     - problem_id: 题目ID
     """
-    print(f"\n[DEBUG] submit_and_grade_code CALLED, problem_id={problem_id}")
+    _log("GRADE", "开始评测", f"题目ID={problem_id}")
 
     user_id, err = _check_user()
     if err:
@@ -442,7 +546,7 @@ def submit_and_grade_code(problem_id: int) -> str:
             }
 
     except Exception as e:
-        print(f"[ERROR] Grading failed: {e}")
+        _log("GRADE", "评测失败", str(e))
         grading_json = {
             "is_correct": False,
             "correctness_detail": f"评测过程出错: {str(e)}",
@@ -456,6 +560,19 @@ def submit_and_grade_code(problem_id: int) -> str:
             "improvement_suggestions": ["请稍后再试"],
             "learning_resources": []
         }
+
+    # 【Reflection 反思步骤】对初步评测结果进行反思，检查是否公平合理
+    reflection_result = _reflect_on_grading(problem.title, user_code, grading_json)
+
+    # 如果反思发现问题，修正 grading_json
+    if not reflection_result.get("is_fair", True):
+        print("[REFLECTION] 反思发现问题，修正评测结果")
+        improved_suggestions = reflection_result.get("improved_suggestions", [])
+        if improved_suggestions:
+            grading_json["improvement_suggestions"] = improved_suggestions
+        missing_issues = reflection_result.get("missing_issues", [])
+        if missing_issues:
+            grading_json["reflection_issues"] = missing_issues
 
     is_correct = grading_json.get("is_correct", False)
     tags_before_update = json.loads(_get_or_create_user_ability(user_id).ability_tags or "{}")
@@ -534,9 +651,24 @@ def submit_and_grade_code(problem_id: int) -> str:
     if not is_correct and resources:
         result_parts.append(f"\n👉 要不要我帮你创建相关学习资料？")
 
-    print(f"[DEBUG] Grading completed: is_correct={is_correct}")
+    # 【Reflection 结果】如果反思发现了遗漏问题，在这里提示
+    missing_issues = grading_json.get("reflection_issues", [])
+    if missing_issues:
+        result_parts.append("\n【反思补充】")
+        result_parts.append(f"  🔍 经审核，以下问题也需要注意：")
+        for issue in missing_issues:
+            result_parts.append(f"     • {issue}")
 
-    return "\n".join(result_parts)
+    # 反思总结（如果有）
+    reflection_summary = reflection_result.get("reflection_summary", "")
+    if reflection_summary and "无需修正" not in reflection_summary:
+        result_parts.append(f"\n💭 反思总结: {reflection_summary}")
+
+    _log("GRADE", f"评测完成", f"正确={is_correct}")
+
+    final_result = "\n".join(result_parts)
+    _log("GRADE", "返回内容长度", f"{len(final_result)} 字符")
+    return final_result
 
 
 @tool
@@ -544,7 +676,7 @@ def get_user_ability_profile() -> str:
     """
     获取用户的能力画像（记录用户的编程能力长短板）
     """
-    print("\n[DEBUG] get_user_ability_profile CALLED")
+    _log("PROFILE", "查看能力画像")
 
     user_id, err = _check_user()
     if err:

@@ -58,7 +58,12 @@ def _check_user():
     return user_id, None
 
 
-# ========== 工具实现 ==========
+def _log(tool: str, msg: str, detail: str = None):
+    if detail:
+        detail = detail[:50] + "..." if len(detail) > 50 else detail
+        print(f"[{tool}] {msg} | {detail}")
+    else:
+        print(f"[{tool}] {msg}")
 
 @tool
 def create_wiki(title: str, content: str) -> str:
@@ -69,7 +74,7 @@ def create_wiki(title: str, content: str) -> str:
     - title: Wiki 标题
     - content: Wiki 内容
     """
-    print("\n[DEBUG] create_wiki CALLED")
+    _log("WIKI", "创建Wiki", title)
 
     user_id, err = _check_user()
     if err:
@@ -100,9 +105,9 @@ def create_wiki(title: str, content: str) -> str:
             )
             db.add(vec)
             db.commit()
-            print(f"[DEBUG] Wiki {wiki_id} 向量已存储 (dim={len(embedding)})")
+            _log("WIKI", "Wiki向量已存储", f"ID={wiki_id}, dim={len(embedding)}")
     except Exception as e:
-        print(f"[WARNING] 向量存储失败: {e}")
+        _log("WIKI", "向量存储失败", str(e))
 
     return f"Wiki创建成功: [{wiki_id}] {title}"
 
@@ -116,7 +121,7 @@ def search_wiki(query: str, top_k: int = 3) -> str:
     - query: 用户的自然语言问题
     - top_k: 返回最相关的条目数量（默认 3 条）
     """
-    print(f"\n[DEBUG] search_wiki CALLED, query={query}, top_k={top_k}")
+    _log("WIKI", "检索Wiki", f"query={query[:30]}...")
 
     user_id, err = _check_user()
     if err:
@@ -158,14 +163,14 @@ def search_wiki(query: str, top_k: int = 3) -> str:
         return "\n\n".join(output_parts)
 
     except Exception as e:
-        print(f"[ERROR] search_wiki 失败: {e}")
+        _log("WIKI", "检索失败", str(e))
         return f"检索失败: {e}"
 
 
 @tool
 def get_all_wikis() -> str:
     """获取所有 Wiki 条目（仅标题列表）。"""
-    print("\n[DEBUG] get_all_wikis CALLED")
+    _log("WIKI", "查看所有Wiki")
 
     user_id, err = _check_user()
     if err:
@@ -221,7 +226,7 @@ def get_wiki_detail(wiki_id: int) -> str:
     参数:
     - wiki_id: Wiki ID（在 search_wiki 的检索结果中可以找到 WikiID）
     """
-    print(f"\n[DEBUG] get_wiki_detail CALLED, wiki_id={wiki_id}")
+    _log("WIKI", "查看Wiki详情", f"wiki_id={wiki_id}")
 
     user_id, err = _check_user()
     if err:

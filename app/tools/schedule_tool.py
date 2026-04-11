@@ -12,6 +12,14 @@ def _check_user():
     return user_id, None
 
 
+def _log(tool: str, msg: str, detail: str = None):
+    if detail:
+        detail = detail[:50] + "..." if len(detail) > 50 else detail
+        print(f"[{tool}] {msg} | {detail}")
+    else:
+        print(f"[{tool}] {msg}")
+
+
 @tool
 def create_schedule(title: str, start_date: str, end_date: str) -> str:
     """
@@ -21,7 +29,7 @@ def create_schedule(title: str, start_date: str, end_date: str) -> str:
     - start_date: 开始日期 (YYYY-MM-DD)
     - end_date: 结束日期 (YYYY-MM-DD)
     """
-    print("\n[DEBUG] create_schedule CALLED")
+    _log("SCHEDULE", "创建日程", title)
 
     user_id, err = _check_user()
     if err:
@@ -38,10 +46,7 @@ def create_schedule(title: str, start_date: str, end_date: str) -> str:
         db.commit()
         db.refresh(schedule)
 
-        print(f"[DEBUG] Inserted ID: {schedule.id}")
-
-        all_data = db.query(Schedule).filter(Schedule.user_id == user_id).all()
-        print(f"[DEBUG] All schedules after insert: {[(s.id, s.title) for s in all_data]}")
+        _log("SCHEDULE", f"日程已创建 ID={schedule.id}", title)
 
         return f"日程创建成功: {title} ({start_date} 到 {end_date})"
 
@@ -51,7 +56,7 @@ def get_all_schedules() -> str:
     """
     查询所有学习日程
     """
-    print("\n[DEBUG] get_all_schedules CALLED")
+    _log("SCHEDULE", "查看日程")
 
     user_id, err = _check_user()
     if err:
@@ -60,19 +65,13 @@ def get_all_schedules() -> str:
     with SessionLocal() as db:
         schedules = db.query(Schedule).filter(Schedule.user_id == user_id).all()
 
-        print(f"[DEBUG] Query result count: {len(schedules)}")
-        print(f"[DEBUG] Data: {[(s.id, s.title) for s in schedules]}")
-
         if not schedules:
             return "目前没有任何日程"
 
-
-        result =  "\n".join(
+        result = "\n".join(
             f"[{s.id}] {s.title} ({s.start_date} 到 {s.end_date})"
             for s in schedules
         )
-        print(f"[DEBUG] Returning: {result}")
-
 
         return result
 
