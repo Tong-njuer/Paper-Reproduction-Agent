@@ -79,8 +79,15 @@ class UserAbility(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, unique=True, index=True)
-    ability_tags = Column(Text)  # JSON: {"指针操作": "薄弱", "链表": "熟练"}
+    # 能力标签: {"指针操作": {"level": "薄弱", "attempts": 3, "solved": 1}}
+    ability_tags = Column(Text)
+    # 错误类型统计: {"语法错误": 2, "逻辑错误": 5, "边界情况": 3}
+    error_history = Column(Text)
+    # 代码风格得分 (0-100)
+    coding_style_score = Column(Integer, default=0)
+    # 总答题数
     total_attempted = Column(Integer, default=0)
+    # 总正确数
     total_solved = Column(Integer, default=0)
     updated_at = Column(String)
 

@@ -71,24 +71,64 @@ def _get_or_create_user_ability(user_id: int) -> UserAbility:
         return ability
 
 
-def _update_ability_tags(user_id: int, problem_tags: list, is_correct: bool):
-    """根据答题结果更新用户能力标签"""
+def _update_ability_tags(user_id: int, problem_tags: list, grading_json: dict):
+    """
+    根据答题结果更新用户能力画像
+    grading_json 包含: is_correct, error_type, coding_style_score, ability_update
+    """
     ability = _get_or_create_user_ability(user_id)
-    current_tags = json.loads(ability.ability_tags or "{}")
 
-    for tag in problem_tags:
+    # 解析现有数据
+    current_tags = json.loads(ability.ability_tags or "{}")
+    error_history = json.loads(ability.error_history or "{}")
+    is_correct = grading_json.get("is_correct", False)
+    error_type = grading_json.get("error_type", "无错误")
+    coding_style_score = grading_json.get("coding_style_score", 50)
+
+    # 更新错误类型统计
+    if error_type and error_type != "无错误":
+        error_history[error_type] = error_history.get(error_type, 0) + 1
+
+    # 更新代码风格得分（滑动平均）
+    old_style = ability.coding_style_score or 50
+    new_style = int((old_style * 0.7) + (coding_style_score * 0.3))
+    ability.coding_style_score = new_style
+
+    # 更新各标签的掌握程度
+    ability_update = grading_json.get("ability_update", {})
+    for tag, info in ability_update.items():
         tag = tag.strip()
         if not tag:
             continue
+
+        level = info.get("level", "一般") if isinstance(info, dict) else info
+
         if tag not in current_tags:
-            current_tags[tag] = "熟练" if is_correct else "薄弱"
+            current_tags[tag] = {
+                "level": level,
+                "attempts": 1,
+                "solved": 1 if is_correct else 0
+            }
         else:
-            if is_correct and current_tags[tag] == "薄弱":
-                current_tags[tag] = "一般"
-            elif not is_correct and current_tags[tag] == "熟练":
-                current_tags[tag] = "一般"
+            current_tags[tag]["attempts"] = current_tags[tag].get("attempts", 0) + 1
+            if is_correct:
+                current_tags[tag]["solved"] = current_tags[tag].get("solved", 0) + 1
+
+            # 根据正确率调整等级
+            old_level = current_tags[tag].get("level", "一般")
+            solved = current_tags[tag]["solved"]
+            attempts = current_tags[tag]["attempts"]
+            success_rate = solved / attempts if attempts > 0 else 0
+
+            if success_rate >= 0.8:
+                current_tags[tag]["level"] = "熟练"
+            elif success_rate >= 0.4:
+                current_tags[tag]["level"] = "一般"
+            else:
+                current_tags[tag]["level"] = "薄弱"
 
     ability.ability_tags = json.dumps(current_tags, ensure_ascii=False)
+    ability.error_history = json.dumps(error_history, ensure_ascii=False)
     ability.total_attempted += 1
     if is_correct:
         ability.total_solved += 1
@@ -97,6 +137,8 @@ def _update_ability_tags(user_id: int, problem_tags: list, is_correct: bool):
     with SessionLocal() as db:
         db_ab = db.query(UserAbility).filter(UserAbility.user_id == user_id).first()
         db_ab.ability_tags = ability.ability_tags
+        db_ab.error_history = ability.error_history
+        db_ab.coding_style_score = ability.coding_style_score
         db_ab.total_attempted = ability.total_attempted
         db_ab.total_solved = ability.total_solved
         db_ab.updated_at = ability.updated_at
@@ -322,7 +364,7 @@ def submit_and_grade_code(problem_id: int) -> str:
     tags = json.loads(problem.tags) if problem.tags else []
     test_cases = json.loads(problem.test_cases) if problem.test_cases else []
 
-    grading_prompt = f"""你是一个代码评测专家。请评测用户的代码答案。
+    grading_prompt = f"""你是一个代码评测专家。请全面评测用户的代码答案。
 
 【题目信息】
 标题: {problem.title}
@@ -333,29 +375,47 @@ def submit_and_grade_code(problem_id: int) -> str:
 【用户提交的代码】
 {user_code}
 
-【评测要求】
-请从以下维度评测代码：
+【评测要求 - 请从以下所有维度评测】
 
-1. **代码正确性**: 代码是否能通过测试用例？逐个用例检查。
-2. **复杂度分析**: 分析时间和空间复杂度。
-3. **编程习惯**: 检查命名规范、代码结构、注释等方面。
-4. **能力标签更新建议**: 根据题目标签（如 {tags}）和用户表现，建议如何更新用户的能力标签。
+1. **正确性**: 代码是否能通过测试用例？逐个用例检查。对于未通过的用例，说明原因。
+2. **错误类型分析**: 用户的代码属于哪种错误？
+   - 语法错误: 代码无法编译/运行
+   - 逻辑错误: 代码能运行但结果不对
+   - 边界情况: 对特殊输入处理不当
+   - 效率问题: 能跑但太慢/太占内存
+3. **复杂度分析**: 时间复杂度和空间复杂度
+4. **代码风格评分** (0-100分):
+   - 命名规范 (30%): 变量/函数命名是否清晰
+   - 代码结构 (30%): 缩进、分段、模块化
+   - 注释说明 (20%): 关键逻辑是否有注释
+   - 编程习惯 (20%): 避免硬编码、错误处理等
+5. **知识点掌握度**: 用户对以下标签的掌握程度
+   标签: {tags}
 
-请以JSON格式返回评测结果，格式如下：
+请以JSON格式返回评测结果：
 {{
     "is_correct": true或false,
-    "correctness_detail": "正确性详细说明",
-    "complexity": "时间和空间复杂度",
-    "coding_habits": "编程习惯评价",
-    "ability_update": "能力标签更新建议，JSON格式如 {{'标签名': '熟练/一般/薄弱'}}",
-    "improvement_suggestions": ["改进建议1", "改进建议2"],
-    "proactive_suggestions": ["主动建议1", "主动建议2"]
+    "correctness_detail": "正确性详细说明，列出每个用例的通过情况",
+    "error_type": "语法错误/逻辑错误/边界情况/无错误",
+    "error_explanation": "错误原因说明（如果没有错误则为空）",
+    "complexity_time": "时间复杂度",
+    "complexity_space": "空间复杂度",
+    "coding_style_score": 分数(0-100),
+    "coding_style_detail": "代码风格详细评价",
+    "ability_update": {{
+        "标签名": {{
+            "level": "熟练/一般/薄弱",
+            "reason": "判断理由"
+        }}
+    }},
+    "improvement_suggestions": ["具体可操作的改进建议1", "改进建议2"],
+    "learning_resources": ["推荐学习资源1（如相关Wiki标题）", "资源2"]
 }}
 
-注意：proactive_suggestions应该包含针对用户弱点的主动建议，例如：
-- 如果用户在指针相关题目上表现不好：建议"要不要我帮你创建一份关于指针操作的Wiki资料？"
-- 如果需要更多练习：建议"需要我帮你制定一个练习计划吗？"
-- 如果概念不清晰：建议"要不要我帮你整理相关知识点到Wiki？"
+重要：
+- ability_update 要基于用户在该标签题目上的表现综合判断
+- improvement_suggestions 要具体指出代码中哪一行/哪个逻辑需要改进
+- learning_resources 如果用户在某知识点薄弱，推荐相关的学习资源
 """
 
     try:
@@ -370,11 +430,15 @@ def submit_and_grade_code(problem_id: int) -> str:
             grading_json = {
                 "is_correct": False,
                 "correctness_detail": grading_result,
-                "complexity": "无法分析",
-                "coding_habits": "无法分析",
+                "error_type": "无法分析",
+                "error_explanation": "",
+                "complexity_time": "无法分析",
+                "complexity_space": "无法分析",
+                "coding_style_score": 0,
+                "coding_style_detail": "无法分析",
                 "ability_update": {},
                 "improvement_suggestions": ["请稍后再试"],
-                "proactive_suggestions": []
+                "learning_resources": []
             }
 
     except Exception as e:
@@ -382,25 +446,31 @@ def submit_and_grade_code(problem_id: int) -> str:
         grading_json = {
             "is_correct": False,
             "correctness_detail": f"评测过程出错: {str(e)}",
-            "complexity": "无法分析",
-            "coding_habits": "无法分析",
+            "error_type": "无法分析",
+            "error_explanation": "",
+            "complexity_time": "无法分析",
+            "complexity_space": "无法分析",
+            "coding_style_score": 0,
+            "coding_style_detail": "无法分析",
             "ability_update": {},
             "improvement_suggestions": ["请稍后再试"],
-            "proactive_suggestions": []
+            "learning_resources": []
         }
 
     is_correct = grading_json.get("is_correct", False)
     tags_before_update = json.loads(_get_or_create_user_ability(user_id).ability_tags or "{}")
 
-    new_tags = _update_ability_tags(user_id, tags, is_correct)
+    # 传入完整 grading_json 以更新更丰富的数据
+    new_tags = _update_ability_tags(user_id, tags, grading_json)
 
     tags_diff = {}
-    for tag, level in new_tags.items():
-        if tag in tags_before_update:
-            if tags_before_update[tag] != level:
-                tags_diff[tag] = f"{tags_before_update[tag]} → {level}"
-        else:
-            tags_diff[tag] = f"新增: {level}"
+    for tag, info in new_tags.items():
+        old_level = tags_before_update.get(tag, {}).get("level", "无记录") if isinstance(tags_before_update.get(tag), dict) else tags_before_update.get(tag, "无记录")
+        new_level = info.get("level", "一般") if isinstance(info, dict) else info
+        if old_level != new_level:
+            tags_diff[tag] = f"{old_level} → {new_level}"
+        elif old_level == "无记录":
+            tags_diff[tag] = f"新增: {new_level}"
 
     answer_record = UserCodeAnswer(
         user_id=user_id,
@@ -415,28 +485,54 @@ def submit_and_grade_code(problem_id: int) -> str:
         db.add(answer_record)
         db.commit()
 
+    # 构建回复
     result_parts = [
         "【评测结果】",
-        f"{'✅' if is_correct else '❌'} 代码正确性: {grading_json.get('correctness_detail', 'N/A')}",
-        f"📊 复杂度分析: {grading_json.get('complexity', 'N/A')}",
-        f"💡 编程习惯: {grading_json.get('coding_habits', 'N/A')}",
+        f"{'✅' if is_correct else '❌'} {'通过' if is_correct else '未通过'} - {grading_json.get('correctness_detail', 'N/A')}",
     ]
 
+    # 错误类型分析
+    error_type = grading_json.get("error_type", "")
+    error_explanation = grading_json.get("error_explanation", "")
+    if error_type and error_type != "无错误":
+        result_parts.append(f"🔍 错误类型: {error_type}")
+        if error_explanation:
+            result_parts.append(f"   原因: {error_explanation}")
+
+    # 复杂度
+    time_complexity = grading_json.get("complexity_time", "N/A")
+    space_complexity = grading_json.get("complexity_space", "N/A")
+    result_parts.append(f"📊 复杂度: 时间 {time_complexity}, 空间 {space_complexity}")
+
+    # 代码风格
+    style_score = grading_json.get("coding_style_score", 0)
+    style_detail = grading_json.get("coding_style_detail", "")
+    result_parts.append(f"💡 代码风格得分: {style_score}/100")
+    if style_detail:
+        result_parts.append(f"   {style_detail}")
+
+    # 能力标签变化
     if tags_diff:
         diff_str = ", ".join([f"{k}({v})" for k, v in tags_diff.items()])
-        result_parts.append(f"🏷️ 能力标签更新: {diff_str}")
-    else:
-        result_parts.append(f"🏷️ 能力标签: {json.dumps(new_tags, ensure_ascii=False)}")
+        result_parts.append(f"🏷️ 能力变化: {diff_str}")
 
-    result_parts.append("\n【改进建议】")
-    for sug in grading_json.get("improvement_suggestions", []):
-        result_parts.append(f"  • {sug}")
+    # 改进建议
+    suggestions = grading_json.get("improvement_suggestions", [])
+    if suggestions:
+        result_parts.append("\n【改进建议】")
+        for sug in suggestions:
+            result_parts.append(f"  • {sug}")
 
-    proactive = grading_json.get("proactive_suggestions", [])
-    if proactive:
-        result_parts.append("\n【主动建议】")
-        for ps in proactive:
-            result_parts.append(f"  → {ps}")
+    # 推荐学习资源
+    resources = grading_json.get("learning_resources", [])
+    if resources:
+        result_parts.append("\n【推荐学习资源】")
+        for res in resources:
+            result_parts.append(f"  📚 {res}")
+
+    # 主动建议
+    if not is_correct and resources:
+        result_parts.append(f"\n👉 要不要我帮你创建相关学习资料？")
 
     print(f"[DEBUG] Grading completed: is_correct={is_correct}")
 
@@ -457,20 +553,53 @@ def get_user_ability_profile() -> str:
     ability = _get_or_create_user_ability(user_id)
 
     tags = json.loads(ability.ability_tags or "{}")
+    error_history = json.loads(ability.error_history or "{}")
 
     result_parts = [
         "【用户能力画像】",
-        f"总答题数: {ability.total_attempted}",
-        f"成功解题数: {ability.total_solved}",
-        f"解题成功率: {ability.total_solved/ability.total_attempted*100:.1f}%" if ability.total_attempted > 0 else "N/A",
-        "\n【各知识点掌握程度】"
+        f"📊 总答题数: {ability.total_attempted}",
+        f"✅ 成功解题数: {ability.total_solved}",
+        f"📈 解题成功率: {ability.total_solved/ability.total_attempted*100:.1f}%" if ability.total_attempted > 0 else "N/A",
+        f"💡 代码风格均分: {ability.coding_style_score}/100" if ability.coding_style_score else "N/A",
     ]
 
+    # 错误类型分析
+    if error_history:
+        result_parts.append("\n【错误类型分布】")
+        for err_type, count in sorted(error_history.items(), key=lambda x: -x[1]):
+            result_parts.append(f"  • {err_type}: {count}次")
+
+    # 知识点掌握度
     if tags:
-        for tag, level in sorted(tags.items()):
-            emoji = "✅" if level == "熟练" else ("⚠️" if level == "一般" else "❌")
-            result_parts.append(f"  {emoji} {tag}: {level}")
+        result_parts.append("\n【各知识点掌握程度】")
+        # 按熟练度分组
+        strong = []
+        medium = []
+        weak = []
+        for tag, info in tags.items():
+            level = info.get("level", "一般") if isinstance(info, dict) else info
+            attempts = info.get("attempts", 0) if isinstance(info, dict) else 0
+            solved = info.get("solved", 0) if isinstance(info, dict) else 0
+            if level == "熟练":
+                strong.append((tag, attempts, solved))
+            elif level == "一般":
+                medium.append((tag, attempts, solved))
+            else:
+                weak.append((tag, attempts, solved))
+
+        if strong:
+            result_parts.append("  ✅ 熟练:")
+            for tag, attempts, solved in strong:
+                result_parts.append(f"     {tag} ({solved}/{attempts})")
+        if medium:
+            result_parts.append("  ⚠️ 一般:")
+            for tag, attempts, solved in medium:
+                result_parts.append(f"     {tag} ({solved}/{attempts})")
+        if weak:
+            result_parts.append("  ❌ 薄弱:")
+            for tag, attempts, solved in weak:
+                result_parts.append(f"     {tag} ({solved}/{attempts})")
     else:
-        result_parts.append("  暂无能力记录")
+        result_parts.append("\n  暂无能力记录")
 
     return "\n".join(result_parts)

@@ -25,6 +25,10 @@ from app.tools.learning_path_tool import (
     get_learning_path_detail,
     recommend_next_learning
 )
+from app.tools.plan_and_execute_tool import (
+    create_learning_plan,
+    preview_learning_plan
+)
 from app.agent.prompt import SYSTEM_PROMPT
 import re
 
@@ -33,6 +37,7 @@ ALL_TOOLS = [
     create_wiki, get_all_wikis, search_wiki, get_wiki_detail, delete_wiki,
     create_code_problem, list_code_problems, get_problem_detail,
     submit_and_grade_code, get_user_ability_profile,
+    create_learning_plan, preview_learning_plan,
     create_learning_path, start_learning_path, complete_current_step,
     get_learning_path_progress, list_learning_paths, get_learning_path_detail,
     recommend_next_learning
@@ -83,7 +88,7 @@ def execute_tool(action: str, action_input: str) -> str:
 
 
 def create_agent():
-    def agent(input_text: str, verbose: bool = True) -> str:
+    def agent(input_text: str, conversation_history: list = None, verbose: bool = True) -> str:
         model = ChatOpenAI(
             model="glm-5.1",
             openai_api_key=ZHIPU_API_KEY,
@@ -91,11 +96,42 @@ def create_agent():
             temperature=0
         )
 
+        # ========== 获取用户能力上下文 ==========
+        from app.core.context import get_current_user_id
+        from app.tools.code_tool import get_user_ability_profile
+        user_id = get_current_user_id()
+        ability_context = ""
+        if user_id:
+            try:
+                ability_context = get_user_ability_profile()
+            except:
+                ability_context = ""
+
         # ========== 初始化对话 ==========
-        messages = [
-            SystemMessage(content=SYSTEM_PROMPT),
-            HumanMessage(content=input_text),
-        ]
+        # 如果有用户能力信息，先注入作为上下文
+        if ability_context and ability_context != "用户未登录":
+            context_msg = HumanMessage(content=f"[用户能力背景]\n{ability_context}\n\n请在回答时结合上述用户能力背景，对基础薄弱的知识点多加解释。")
+            messages = [
+                SystemMessage(content=SYSTEM_PROMPT),
+                context_msg,
+            ]
+        else:
+            messages = [
+                SystemMessage(content=SYSTEM_PROMPT),
+            ]
+
+        # 添加对话历史
+        if conversation_history:
+            for msg in conversation_history:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role == "user":
+                    messages.append(HumanMessage(content=content))
+                elif role == "assistant":
+                    messages.append(HumanMessage(content=content))
+
+        # 添加当前消息
+        messages.append(HumanMessage(content=input_text))
 
         max_steps = 15  # ReAct 需要多轮推理，增加步数上限
 

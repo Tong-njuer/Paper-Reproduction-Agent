@@ -44,6 +44,11 @@ def logout():
     st.session_state.messages = []
 
 
+def clear_chat():
+    """清空对话历史"""
+    st.session_state.messages = []
+
+
 def show_login_page():
     """显示登录/注册页面"""
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -107,10 +112,14 @@ def show_main_app():
     )
 
     # 顶部栏
-    col1, col2 = st.columns([6, 1])
+    col1, col2, col3 = st.columns([5, 1, 1])
     with col1:
         st.title(f"🤖 编程教练Agent - {st.session_state.username}")
     with col2:
+        if st.button("清空对话"):
+            clear_chat()
+            st.rerun()
+    with col3:
         if st.button("登出"):
             logout()
             st.rerun()
@@ -149,10 +158,14 @@ def show_main_app():
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # 调用Agent
+        # 调用Agent（传入对话历史）
         with st.chat_message("assistant"):
             with st.spinner("思考中..."):
-                response = st.session_state.agent(prompt, verbose=False)
+                response = st.session_state.agent(
+                    prompt,
+                    conversation_history=st.session_state.messages[:-1],  # 不包含刚添加的用户消息
+                    verbose=False
+                )
                 st.markdown(response)
 
         st.session_state.messages.append({"role": "assistant", "content": response})
