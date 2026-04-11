@@ -1,0 +1,16 @@
+# Workspace files (user code)
+workspace/
+
+# Database
+*.db
+
+# ChromaDB data
+chroma_data/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment
+.env
