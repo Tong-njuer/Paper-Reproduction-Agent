@@ -1,148 +1,428 @@
-# 编程教练 Agent
+# 📘 Autonomous Agent Core 设计说明书（无 Tool 部分）
 
-一个 AI 驱动的编程学习助手，基于 ReAct Agent 架构，帮助用户通过对话学习编程。
+---
 
-## 核心功能
+# 一、设计目标（Design Goals）
 
-- **对话问答** — 随时提问，AI 实时解答
-- **代码出题与评测** — 自动生成题目，自动评测代码并给出改进建议
-- **Wiki 知识库** — RAG 语义检索，AI 自动整理学习资料
-- **学习路径规划** — 制定并执行完整的学习计划
-- **日程管理** — 安排学习时间和进度
-- **能力画像** — 记录用户的知识点掌握程度，智能推荐学习内容
+本系统旨在构建一个**通用的自治 Agent Core**，具备以下能力：
 
-## 技术架构
+### 🎯 核心目标
 
-### Agent 模式
+1. **自主规划能力（Planning）**
 
-采用 **ReAct (Reasoning + Acting)** 模式：
+   * 能将复杂目标拆解为子任务
+   * 支持动态重规划（replanning）
 
-```
-用户输入 → Thought（思考）→ Action（行动）→ Observation（观察）→ ... → Final Answer
-```
+2. **交互式决策能力（ReAct）**
 
-Agent 配备多个工具（Tools），根据用户问题自动选择调用：
+   * 基于环境反馈持续决策
+   * 支持多步推理与行动循环
 
-| 工具 | 功能 |
-|------|------|
-| 日程管理 | 创建、查看、修改、删除学习日程 |
-| Wiki 知识库 | 创建知识条目、语义搜索 |
-| 代码出题 | 根据需求生成练习题 |
-| 代码评测 | 评测用户提交的代码，分析错误类型、复杂度、代码风格 |
-| 学习路径 | 创建多步骤学习路径，支持断点续学 |
-| 一键学习计划 | 输入需求，自动生成完整学习计划（日程+Wiki+题目+路径） |
+3. **自我修正能力（Reflexion）**
 
-### 代码
+   * 能分析失败原因
+   * 能调整策略并避免重复错误
 
-```
-app/
-├── agent/
-│   ├── agent.py       # ReAct Agent 核心
-│   ├── planner.py      # Plan+Execute 规划器（生成学习计划）
-│   └── prompt.py       # System Prompt
-├── tools/
-│   ├── code_tool.py    # 代码出题、评测、用户能力画像
-│   ├── wiki_tool.py    # Wiki + RAG 语义检索
-│   ├── schedule_tool.py # 日程管理
-│   ├── learning_path_tool.py  # 学习路径管理
-│   └── plan_and_execute_tool.py  # 一键学习计划入口
-├── db/
-│   ├── models.py       # SQLAlchemy 模型
-│   └── database.py     # 数据库连接
-└── core/
-    ├── config.py       # 配置（API Key 等）
-    ├── auth.py         # 用户认证
-    └── context.py      # 用户上下文（线程本地）
-```
+4. **状态感知与记忆能力（Memory）**
 
-## 快速开始
+   * 跟踪历史行为与结果
+   * 支持长期策略优化
 
-### 环境要求
+---
 
-- Python 3.11+
-- Zhipu API Key
+# 二、总体架构（Architecture Overview）
 
-### 安装
-
-```bash
-pip install -r requirements.txt
+```id="agent_arch"
+                ┌──────────────┐
+                │    Goal      │
+                └──────┬───────┘
+                       ↓
+                ┌──────────────┐
+                │   Planner    │
+                └──────┬───────┘
+                       ↓
+                ┌──────────────┐
+                │   ReAct Loop │
+                └──────┬───────┘
+                       ↓
+                ┌──────────────┐
+                │ Observation  │
+                └──────┬───────┘
+                       ↓
+                ┌──────────────┐
+                │  Reflexion   │
+                └──────┬───────┘
+                       ↓
+                ┌──────────────┐
+                │   Memory     │
+                └──────────────┘
 ```
 
-### 配置
+---
 
-创建 `.env` 文件：
+# 三、核心模块设计（Core Components）
 
-```
-ZHIPU_API_KEY=your_api_key_here
-```
+---
 
-### 运行
+# 3.1 Planner（规划模块）
 
-**Streamlit Web 界面：**
+## 📌 职责
 
-```bash
-streamlit run streamlit_app.py
-```
+* 将高层目标拆解为可执行子任务
+* 根据执行反馈动态调整计划
 
-**CLI 模式（使用默认用户）：**
+---
 
-```bash
-python -m app.main
-```
+## 📥 输入
 
-**Docker 部署：**
+* `goal`：用户目标
+* `context`：当前状态（历史、错误、进度）
 
-```bash
-docker-compose up
-```
+---
 
-## 用户交互示例
+## 📤 输出
 
-### 对话问答
-
-```
-你: 什么是指针？
-Agent: 关于 C++ 指针，...
+```json
+[
+  {"step_id": 1, "description": "安装依赖"},
+  {"step_id": 2, "description": "运行训练脚本"}
+]
 ```
 
-### 出题与评测
+---
 
+## 🧠 设计要点
+
+### ✅ 支持动态规划
+
+* 允许根据失败进行replan
+
+### ✅ 不绑定具体工具
+
+* 只描述“做什么”，不描述“怎么做”
+
+---
+
+## 🔄 Replanning触发条件
+
+* 连续失败
+* 环境变化
+* 新信息出现
+
+---
+
+# 3.2 ReAct Engine（行动决策模块）
+
+## 📌 职责
+
+* 在每一步决定“下一步行动”
+* 基于Observation进行推理
+
+---
+
+## 🔁 工作模式（核心循环）
+
+```id="react_loop"
+Thought → Action → Observation → Thought → ...
 ```
-你:出一道链表的题目
-Agent: 题目已创建，文件在 workspace/user_1/problem_1.md
 
-你: 提交第1题答案
-Agent: 【评测结果】
-      ✅ 通过
-      📊 复杂度: O(n)
-      💡 代码风格得分: 75/100
-      【改进建议】...
+---
+
+## 📥 输入
+
+* 当前计划
+* 历史行为
+* 最新Observation
+
+---
+
+## 📤 输出
+
+```json
+{
+  "thought": "需要先运行代码测试环境",
+  "action": "run_code",
+  "args": {
+    "command": "python train.py"
+  }
+}
 ```
 
-### 一键学习计划
+---
 
+## 🧠 设计要点
+
+### ✅ 局部决策（step-level reasoning）
+
+* 不依赖全局计划精确性
+
+### ✅ 支持探索（exploration）
+
+* 可以尝试不同路径
+
+---
+
+# 3.3 Reflexion（自我反思模块）
+
+## 📌 职责（最关键模块🔥）
+
+* 分析失败原因
+* 提供修复策略
+* 更新Agent行为
+
+---
+
+## 📥 输入
+
+* Observation（尤其是错误）
+* 当前策略
+
+---
+
+## 📤 输出
+
+```json
+{
+  "analysis": "缺少依赖numpy",
+  "fix_action": {
+    "action": "install_package",
+    "args": {"package": "numpy"}
+  },
+  "lesson": "运行前应检查依赖"
+}
 ```
-你: 帮我创建一个Python学习计划
-Agent: 自动创建日程、Wiki、题目、学习路径
-      📅 已创建 4 个日程
-      📖 已创建 4 篇 Wiki
-      💻 已创建 4 道练习题
-      🗺️ 学习路径已创建
+
+---
+
+## 🧠 设计要点
+
+### ✅ 结构化错误理解
+
+* 使用error schema（type/subtype）
+
+### ✅ 可学习性
+
+* 将经验写入Memory
+
+---
+
+## 🔥 Reflexion的三层能力
+
+| 层级 | 能力       |
+| -- | -------- |
+| L1 | 错误解释     |
+| L2 | 修复建议     |
+| L3 | 策略优化（长期） |
+
+---
+
+# 3.4 Memory（记忆模块）
+
+## 📌 职责
+
+* 存储历史行为与结果
+* 支持策略改进
+
+---
+
+## 🧠 Memory类型
+
+### 1️⃣ Short-term Memory
+
+```json
+{
+  "last_action": "...",
+  "last_error": "..."
+}
 ```
 
-## 数据库
+---
 
-SQLite 数据库（`schedule.db`），包含以下表：
+### 2️⃣ Long-term Memory
 
-- `users` — 用户账户
-- `schedules` — 日程安排
-- `wiki` / `wiki_vectors` — 知识库（支持向量检索）
-- `code_problems` — 代码题目
-- `user_code_answers` — 用户提交记录
-- `user_abilities` — 用户能力画像
-- `learning_paths` / `path_steps` / `user_path_progress` — 学习路径
+```json
+{
+  "common_errors": [
+    {"error": "missing numpy", "fix": "pip install numpy"}
+  ]
+}
+```
 
-## 未来计划
+---
 
-- **前端重构** — FastAPI + React 全新前端（详见上方前端开发指南）
-- **自治 Agent 模式** — 在现有 Agentic Workflow 基础上，新增一键执行复杂任务的 Autonomous 模式
+## 📌 作用
+
+* 避免重复错误
+* 提高效率
+
+---
+
+# 3.5 State Manager（状态管理）
+
+## 📌 职责
+
+* 管理Agent当前状态
+* 支持可视化
+
+---
+
+## 📊 状态示例
+
+```json
+{
+  "step": 3,
+  "plan_progress": "running experiment",
+  "last_action": "...",
+  "status": "error"
+}
+```
+
+---
+
+# 四、Agent运行流程（Execution Flow）
+
+---
+
+## 🔁 主循环
+
+```id="main_loop"
+while not done:
+
+    1. Planner → 生成/更新计划
+    
+    2. ReAct → 决定行动
+    
+    3. 执行（Tool Layer）
+    
+    4. 获取Observation
+    
+    5. 若失败 → Reflexion
+    
+    6. 更新Memory
+    
+    7. 判断是否终止
+```
+
+---
+
+## 📌 终止条件
+
+* 任务成功
+* 达到最大步数
+* 多次失败无法修复
+
+---
+
+# 五、模块协同机制（Coordination）
+
+---
+
+## 🔗 Planner 与 ReAct
+
+* Planner提供方向
+* ReAct做局部决策
+
+---
+
+## 🔗 ReAct 与 Reflexion
+
+* ReAct负责执行
+* Reflexion负责纠错
+
+---
+
+## 🔗 Reflexion 与 Memory
+
+* Reflexion生成经验
+* Memory存储经验
+
+---
+
+# 六、关键设计原则（Key Principles）
+
+---
+
+## ✅ 1. 解耦（Decoupling）
+
+* Agent Core 不依赖具体工具
+
+---
+
+## ✅ 2. 结构化（Structured Output）
+
+* 所有模块输出JSON格式
+
+---
+
+## ✅ 3. 可解释性（Interpretability）
+
+* 每一步都有 thought / action / reflection
+
+---
+
+## ✅ 4. 可扩展性（Extensibility）
+
+* 可添加新模块（如多Agent）
+
+---
+
+## ✅ 5. 试错驱动（Trial-and-Error Driven）
+
+* 系统通过失败不断优化
+
+---
+
+# 七、可视化设计（Visualization）
+
+---
+
+## CLI示例
+
+```id="cli_demo"
+[Step 3]
+Thought: 尝试运行代码
+Action: python train.py
+Observation: ERROR missing numpy
+
+[Reflection]
+→ 安装numpy
+
+[Next Action]
+pip install numpy
+```
+
+---
+
+## Web可视化（推荐）
+
+* 状态流图（Graph）
+* 行为日志
+* 错误演化过程
+
+---
+
+# 八、扩展能力（Advanced Features）
+
+---
+
+## ⭐ 1. 多策略探索
+
+* 同一问题尝试多种方案
+
+---
+
+## ⭐ 2. 自适应规划
+
+* Planner基于历史优化
+
+---
+
+## ⭐ 3. 元学习（Meta-learning）
+
+* 优化自身prompt或策略
+
+---
+
+# 九、总结（可直接写报告）
+
+> 本Agent Core通过集成Planner、ReAct与Reflexion三大核心模块，实现了从目标分解、动态决策到错误驱动优化的完整闭环。系统采用结构化接口与模块解耦设计，使其具备良好的扩展性与跨任务适应能力。

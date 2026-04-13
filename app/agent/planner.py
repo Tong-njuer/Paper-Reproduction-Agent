@@ -1,294 +1,377 @@
-"""
-【Plan + Execute 模式 - 规划器】
+# ============================================================
+# 规划器模块
+# ============================================================
+# 负责将高层目标分解为可执行的子任务。
+# 支持基于执行反馈的动态重新规划。
+#
+# Console Output:
+#   - Plan generation
+#   - Plan updates and replanning
+#   - Step details
+# ============================================================
 
-本模块实现 Plan + Execute 架构：
-1. Plan（规划阶段）：LLM 生成完整的学习计划（不执行）
-2. Execute（执行阶段）：按计划顺序执行所有工具调用
-
-对比 ReAct：
-- ReAct：边想边做，适合单步决策
-- Plan+Execute：先想好再做，适合多步骤复杂任务
-
-使用场景：
-- 用户说"我想要Python学习路径"
-- create_learning_plan 工具调用 generate_learning_plan（Plan）
-- 然后调用 execute_learning_plan（Execute）
-"""
-
-import json
-from datetime import datetime, timedelta
-
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
-
-from app.core.config import ZHIPU_API_KEY
+from typing import Dict, Any, List, Optional
+from pydantic import BaseModel, Field
+from app.core.llm import get_llm
+from app.core.context import ExecutionContext
 
 
-def _log(msg: str, detail: str = None):
-    if detail:
-        detail = detail[:50] + "..." if len(detail) > 50 else detail
-        print(f"[PLAN] {msg} | {detail}")
-    else:
-        print(f"[PLAN] {msg}")
+class PlanStep(BaseModel):
+    """
+    计划中的单个步骤。
+
+    Attributes:
+        step_id: 此步骤的唯一标识符
+        description: 人类可读的描述
+        status: 当前状态（pending, in_progress, completed, failed, skipped）
+        depends_on: 此步骤依赖的 step_id 列表
+        result: 执行结果（如果完成）
+    """
+    step_id: int
+    description: str
+    status: str = "pending"
+    depends_on: List[int] = Field(default_factory=list)
+    result: Optional[str] = None
 
 
-PLANNER_PROMPT = """你是一个学习计划规划专家。当用户说想要学习某个主题时，你需要为他规划一个完整的编程学习路径。
+class Plan(BaseModel):
+    """
+    包含多个步骤的计划。
 
-【任务】
-用户想学习: {user_request}
+    Attributes:
+        goal: 此计划针对的原始目标
+        steps: 计划步骤列表
+        current_step_index: 下一个要执行的步骤索引
+        status: 总体计划状态
+        needs_replan: 是否建议重新规划
+    """
+    goal: str
+    steps: List[PlanStep] = Field(default_factory=list)
+    current_step_index: int = 0
+    status: str = "initialized"
+    needs_replan: bool = False
+    replan_reason: Optional[str] = None
 
-请规划一个完整的编程学习计划，包括：
+    def get_next_step(self) -> Optional[PlanStep]:
+        """
+        获取下一个要执行的待处理步骤。
 
-1. **路径结构**：这条学习路径包含几个步骤，每个步骤的主题是什么
-2. **日程安排**：每个步骤需要多长时间（用 create_schedule 的日期格式）
-3. **Wiki 资料**：每个步骤需要什么学习资料（创建 Wiki 的 title 和 content 概要）
-4. **练习题目**：每个步骤需要什么练习题（创建 CodeProblem 的要素）
+        Returns:
+            PlanStep 或 None（如果没有待处理步骤）
+        """
+        for step in self.steps:
+            if step.status == "pending":
+                return step
+        return None
 
-【输出格式】
-请以 JSON 格式输出，结构如下：
+    def mark_step_complete(self, step_id: int, result: str) -> None:
+        """
+        将步骤标记为完成。
+
+        Args:
+            step_id: 要标记的步骤 ID
+            result: 执行结果
+        """
+        for step in self.steps:
+            if step.step_id == step_id:
+                step.status = "completed"
+                step.result = result
+                break
+
+    def mark_step_failed(self, step_id: int, error: str) -> None:
+        """
+        将步骤标记为失败。
+
+        Args:
+            step_id: 失败步骤的 ID
+            error: 错误消息
+        """
+        for step in self.steps:
+            if step.step_id == step_id:
+                step.status = "failed"
+                step.result = error
+                break
+        self.needs_replan = True
+        self.replan_reason = f"Step {step_id} failed: {error}"
+
+    def is_complete(self) -> bool:
+        """
+        检查所有步骤是否完成。
+
+        Returns:
+            bool: 所有步骤是否完成
+        """
+        return all(step.status in ("completed", "skipped", "failed") for step in self.steps)
+
+    def print_plan(self) -> None:
+        """
+        Print the current plan to console.
+        """
+        print("\n" + "-" * 50)
+        print(f"[INFO] Plan for: {self.goal[:60]}...")
+        print("-" * 50)
+
+        for step in self.steps:
+            # Status icon
+            icons = {
+                "pending": "[WAIT]",
+                "in_progress": "[RETRY]",
+                "completed": "[OK]",
+                "failed": "[X]",
+                "skipped": "[SKIP]",
+            }
+            icon = icons.get(step.status, "[?]")
+
+            # Indent based on depth
+            indent = "  " if step.depends_on else ""
+
+            print(f"{icon} {indent}Step {step.step_id}: {step.description}")
+
+            if step.result:
+                print(f"   {indent}Result: {step.result[:50]}...")
+
+        if self.needs_replan:
+            print(f"\n[!]  Replanning needed: {self.replan_reason}")
+
+        print("-" * 50 + "\n")
+
+
+class Planner:
+    """
+    规划器模块，用于目标分解。
+
+    使用 LLM 将高层目标分解为可执行的步骤。
+
+    Attributes:
+        llm: 用于生成计划的 LLM 接口
+    """
+
+    def __init__(self):
+        """Initialize the Planner."""
+        self.llm = get_llm()
+        print("[BRAIN] Planner initialized")
+
+    def create_plan(self, goal: str, context: Optional[ExecutionContext] = None) -> Plan:
+        """
+        为给定目标创建新计划。
+
+        Args:
+            goal: 要计划的高层目标
+            context: 额外的上下文（可选）
+
+        Returns:
+            Plan: 生成的计划
+        """
+        print(f"\n[NOTE] Planner: Creating plan for goal: {goal[:80]}...")
+
+        # Build prompt for plan generation
+        prompt = self._build_plan_prompt(goal, context)
+
+        # Generate plan using LLM
+        if self.llm.is_available():
+            try:
+                response = self.llm.generate_structured(prompt)
+                steps = self._parse_plan_response(response)
+            except Exception as e:
+                print(f"[!]  LLM plan generation failed: {e}, using fallback")
+                steps = self._create_fallback_plan(goal)
+        else:
+            # Demo mode - create simple plan
+            steps = self._create_demo_plan(goal)
+
+        plan = Plan(goal=goal, steps=steps)
+        plan.print_plan()
+
+        return plan
+
+    def replan(self, plan: Plan, reason: str, context: ExecutionContext) -> Plan:
+        """
+        基于执行反馈创建新计划。
+
+        Args:
+            plan: 当前计划
+            reason: 需要重新规划的原因
+            context: 当前执行上下文
+
+        Returns:
+            Plan: 新的修订计划
+        """
+        print(f"\n[RETRY] Planner: Replanning due to: {reason}")
+        print(f"   Completed steps: {len([s for s in plan.steps if s.status == 'completed'])}")
+        print(f"   Failed steps: {len([s for s in plan.steps if s.status == 'failed'])}")
+
+        # Build prompt for replanning
+        prompt = self._build_replan_prompt(plan, reason, context)
+
+        # Generate new plan
+        if self.llm.is_available():
+            try:
+                response = self.llm.generate_structured(prompt)
+                new_steps = self._parse_plan_response(response)
+            except Exception as e:
+                print(f"[!]  LLM replan failed: {e}, using fallback")
+                new_steps = self._create_recovery_plan(plan, reason)
+        else:
+            new_steps = self._create_recovery_plan(plan, reason)
+
+        # Keep completed steps, replace remaining
+        completed_steps = [s for s in plan.steps if s.status == "completed"]
+        new_plan = Plan(
+            goal=plan.goal,
+            steps=completed_steps + new_steps,
+            current_step_index=len(completed_steps),
+        )
+
+        new_plan.print_plan()
+        return new_plan
+
+    def _build_plan_prompt(self, goal: str, context: Optional[ExecutionContext]) -> str:
+        """
+        构建计划生成的提示。
+
+        Args:
+            goal: 要计划的目标
+            context: 可选的执行上下文
+
+        Returns:
+            str: 格式化的提示
+        """
+        base_prompt = f"""You are a planning agent. Given the following goal, break it down into specific, executable steps.
+
+Goal: {goal}
+
+Requirements:
+1. Each step should be atomic and achievable in one action
+2. Steps should be ordered logically (dependencies first)
+3. Focus on the essential steps needed to achieve the goal
+4. Do NOT specify HOW to do things, only WHAT to do
+
+Output format (JSON):
 {{
-    "path_title": "学习路径名称",
-    "path_description": "路径描述",
     "steps": [
-        {{
-            "step_title": "步骤1标题",
-            "step_description": "步骤描述",
-            "schedule": {{
-                "title": "日程标题",
-                "start_date": "YYYY-MM-DD",
-                "end_date": "YYYY-MM-DD"
-            }},
-            "wiki": {{
-                "title": "Wiki标题",
-                "content_summary": "Wiki内容概要"
-            }},
-            "problem": {{
-                "title": "题目标题",
-                "description": "题目描述概要",
-                "difficulty": "easy/medium/hard",
-                "tags": ["标签1", "标签2"]
-            }}
-        }}
+        {{"step_id": 1, "description": "Step description", "depends_on": []}},
+        {{"step_id": 2, "description": "Step description", "depends_on": [1]}}
     ]
 }}
-
-【重要】
-- 生成 3-5 个步骤比较合适
-- start_date 从今天开始，按顺序安排
-- 每个步骤的 Wiki 和题目要与该步骤的主题匹配
-- difficulty 根据步骤在路径中的位置递增（前面简单，后面复杂）
-- 输出纯 JSON，不要有其他内容
 """
 
+        if context and context.metadata.get("history"):
+            base_prompt += f"\n\nPrevious attempts context:\n{context.metadata['history']}"
 
-def call_llm(prompt: str) -> str:
-    """调用 LLM"""
-    llm = ChatOpenAI(
-        model="glm-4",
-        openai_api_key=ZHIPU_API_KEY,
-        openai_api_base="https://open.bigmodel.cn/api/paas/v4",
-        temperature=0.3
-    )
-    response = llm.invoke([HumanMessage(content=prompt)])
-    return response.content.strip()
+        return base_prompt
 
+    def _build_replan_prompt(self, plan: Plan, reason: str, context: ExecutionContext) -> str:
+        """
+        构建重新规划的提示。
 
-def parse_json_response(text: str) -> dict:
-    """从 LLM 输出中提取 JSON"""
-    # 尝试直接解析
-    try:
-        return json.loads(text)
-    except:
-        pass
+        Args:
+            plan: 当前计划
+            reason: 需要重新规划的原因
+            context: 执行上下文
 
-    # 尝试提取 ```json ... ``` 块
-    import re
-    json_match = re.search(r"```json\s*([\s\S]*?)\s*```", text)
-    if json_match:
-        try:
-            return json.loads(json_match.group(1))
-        except:
-            pass
+        Returns:
+            str: 格式化的提示
+        """
+        failed_steps = [s for s in plan.steps if s.status == "failed"]
+        completed_steps = [s for s in plan.steps if s.status == "completed"]
 
-    # 尝试提取 { ... } 块
-    json_match = re.search(r"\{[\s\S]*\}", text)
-    if json_match:
-        try:
-            return json.loads(json_match.group())
-        except:
-            pass
+        prompt = f"""You are a replanning agent. The current plan failed and needs adjustment.
 
-    return None
+Original Goal: {plan.goal}
 
+Reason for replanning: {reason}
 
-def generate_learning_plan(user_request: str) -> dict | None:
-    """生成学习计划"""
-    prompt = PLANNER_PROMPT.format(user_request=user_request)
-    response = call_llm(prompt)
-    return parse_json_response(response)
+Completed Steps:
+{self._format_steps(completed_steps)}
 
+Failed Steps:
+{self._format_steps(failed_steps)}
 
-def execute_learning_plan(plan: dict, tool_executor) -> str:
-    """
-    执行学习计划
-    tool_executor: 一个函数，接收 (tool_name, kwargs) 并执行，返回结果
-    """
-    results = {
-        "schedules": [],
-        "wikis": [],
-        "problems": [],
-        "path_id": None
-    }
+Create a revised plan that:
+1. Keeps the completed steps as-is
+2. Modifies or replaces the failed steps
+3. Adds new steps if needed to overcome the failure
+4. Focuses on what went wrong and how to fix it
 
-    step_wiki_ids = []
-    step_problem_ids = []
-    step_schedules = []
-
-    # 第一步：创建所有日程
-    for step in plan["steps"]:
-        sched = step.get("schedule", {})
-        if sched:
-            title = sched.get("title", "学习日程")
-            start = sched.get("start_date", datetime.now().strftime("%Y-%m-%d"))
-            end = sched.get("end_date", (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d"))
-
-            result = tool_executor("create_schedule", {
-                "title": title,
-                "start_date": start,
-                "end_date": end
-            })
-            results["schedules"].append(result)
-            _log("Created schedule", title)
-
-            # 从结果中提取 schedule_id（如果工具返回了的话）
-            import re
-            sid_match = re.search(r"日程创建成功: \[(\d+)\]", result)
-            if sid_match:
-                step_schedules.append(int(sid_match.group(1)))
-
-    # 第二步：创建所有 Wiki
-    for i, step in enumerate(plan["steps"]):
-        wiki_data = step.get("wiki", {})
-        if wiki_data:
-            title = wiki_data.get("title", f"学习资料 - {step.get('step_title', '')}")
-            content = wiki_data.get("content_summary", step.get("step_description", ""))
-
-            result = tool_executor("create_wiki", {
-                "title": title,
-                "content": content
-            })
-            results["wikis"].append(result)
-            _log("Created wiki", title)
-
-            wid_match = re.search(r"Wiki创建成功: \[(\d+)\]", result)
-            if wid_match:
-                step_wiki_ids.append(int(wid_match.group(1)))
-
-    # 第三步：创建所有题目
-    for i, step in enumerate(plan["steps"]):
-        prob_data = step.get("problem", {})
-        if prob_data:
-            # 生成测试用例
-            test_cases = _generate_test_cases(prob_data.get("title", ""), prob_data.get("tags", []))
-
-            result = tool_executor("create_code_problem", {
-                "title": prob_data.get("title", f"练习题 - {step.get('step_title', '')}"),
-                "description": prob_data.get("description", step.get("step_description", "")),
-                "difficulty": prob_data.get("difficulty", "medium"),
-                "tags": json.dumps(prob_data.get("tags", [])),
-                "test_cases": json.dumps(test_cases)
-            })
-            results["problems"].append(result)
-            _log("Created problem", prob_data.get('title', ''))
-
-            pid_match = re.search(r"题目创建成功: \[(\d+)\]", result)
-            if pid_match:
-                step_problem_ids.append(int(pid_match.group(1)))
-
-    # 第四步：创建学习路径（关联所有内容）
-    steps_for_path = []
-    for i, step in enumerate(plan["steps"]):
-        steps_for_path.append({
-            "title": step.get("step_title", f"步骤{i+1}"),
-            "description": step.get("step_description", ""),
-            "wiki_ids": [step_wiki_ids[i]] if i < len(step_wiki_ids) else [],
-            "problem_ids": [step_problem_ids[i]] if i < len(step_problem_ids) else []
-        })
-
-    path_result = tool_executor("create_learning_path", {
-        "title": plan.get("path_title", "学习路径"),
-        "description": plan.get("path_description", ""),
-        "steps": json.dumps(steps_for_path)
-    })
-    results["path_id"] = path_result
-    _log("Created learning path")
-
-    return _format_plan_summary(plan, results)
-
-
-def _generate_test_cases(title: str, tags: list) -> list:
-    """根据题目信息生成测试用例"""
-    # 使用 LLM 生成测试用例
-    prompt = f"""根据以下编程练习信息，生成 3 个测试用例。
-
-题目: {title}
-标签: {', '.join(tags)}
-
-请以 JSON 数组格式输出测试用例，每个用例包含 input 和 expected 字段：
-[
-    {{"input": "输入1", "expected": "期望输出1"}},
-    ...
-]
-
-要求：
-- input 尽量简洁，符合 ACM 竞赛风格
-- 覆盖基本情况和边界情况
-- 只输出 JSON，不要有其他内容
-"""
-    response = call_llm(prompt)
-    try:
-        return parse_json_response(response) or [
-            {"input": "1 2", "expected": "3"},
-            {"input": "5 3", "expected": "8"},
-            {"input": "10 20", "expected": "30"}
-        ]
-    except:
-        return [
-            {"input": "1 2", "expected": "3"},
-            {"input": "5 3", "expected": "8"},
-            {"input": "10 20", "expected": "30"}
-        ]
-
-
-def _format_plan_summary(plan: dict, results: dict) -> str:
-    """格式化计划执行结果摘要"""
-    parts = [
-        "=" * 50,
-        "🎉 学习计划创建完成！",
-        "=" * 50,
-        f"\n📚 路径名称: {plan.get('path_title', '学习路径')}",
-        f"📝 路径描述: {plan.get('path_description', '')}",
+Output format (JSON):
+{{
+    "steps": [
+        {{"step_id": 1, "description": "Step description", "depends_on": []}}
     ]
+}}
+"""
+        return prompt
 
-    parts.append(f"\n📅 已创建 {len(results['schedules'])} 个日程")
-    for i, s in enumerate(plan["steps"]):
-        sched = s.get("schedule", {})
-        if sched:
-            parts.append(f"  {i+1}. {sched.get('title', '')} ({sched.get('start_date', '')} ~ {sched.get('end_date', '')})")
+    def _format_steps(self, steps: List[PlanStep]) -> str:
+        """Format steps for prompt."""
+        if not steps:
+            return "None"
+        return "\n".join(
+            f"- Step {s.step_id}: {s.description} (Result: {s.result})"
+            for s in steps
+        )
 
-    parts.append(f"\n📖 已创建 {len(results['wikis'])} 篇 Wiki")
-    for i, s in enumerate(plan["steps"]):
-        wiki = s.get("wiki", {})
-        if wiki:
-            parts.append(f"  {i+1}. {wiki.get('title', '')}")
+    def _parse_plan_response(self, response: Dict[str, Any]) -> List[PlanStep]:
+        """
+        Parse LLM response into PlanStep objects.
 
-    parts.append(f"\n💻 已创建 {len(results['problems'])} 道练习题")
-    for i, s in enumerate(plan["steps"]):
-        prob = s.get("problem", {})
-        if prob:
-            parts.append(f"  {i+1}. {prob.get('title', '')} (难度: {prob.get('difficulty', '')})")
+        Args:
+            response: LLM JSON response
 
-    parts.append(f"\n🗺️  学习路径已创建，可对我说「开始学习路径X」开始学习")
-    parts.append("=" * 50)
+        Returns:
+            List of PlanStep objects
+        """
+        steps = []
+        for item in response.get("steps", []):
+            steps.append(
+                PlanStep(
+                    step_id=item.get("step_id", len(steps) + 1),
+                    description=item.get("description", "No description"),
+                    depends_on=item.get("depends_on", []),
+                )
+            )
+        return steps
 
-    return "\n".join(parts)
+    def _create_fallback_plan(self, goal: str) -> List[PlanStep]:
+        """
+        Create simple fallback plan when LLM unavailable.
+
+        Args:
+            goal: The goal
+
+        Returns:
+            List of PlanStep objects
+        """
+        return [
+            PlanStep(step_id=1, description=f"Analyze goal: {goal[:50]}..."),
+            PlanStep(step_id=2, description="Break down into sub-tasks"),
+            PlanStep(step_id=3, description="Execute sub-tasks sequentially"),
+            PlanStep(step_id=4, description="Verify results and conclude"),
+        ]
+
+    def _create_demo_plan(self, goal: str) -> List[PlanStep]:
+        """Create a demo plan for demonstration mode."""
+        return [
+            PlanStep(step_id=1, description=f"[DEMO] Understand: {goal[:50]}..."),
+            PlanStep(step_id=2, description="[DEMO] Create sub-plan"),
+            PlanStep(step_id=3, description="[DEMO] Execute step 1"),
+            PlanStep(step_id=4, description="[DEMO] Execute step 2"),
+            PlanStep(step_id=5, description="[DEMO] Verify completion"),
+        ]
+
+    def _create_recovery_plan(self, plan: Plan, reason: str) -> List[PlanStep]:
+        """
+        Create recovery plan after failure.
+
+        Args:
+            plan: Current plan
+            reason: Failure reason
+
+        Returns:
+            List of new PlanStep objects
+        """
+        return [
+            PlanStep(step_id=len(plan.steps) + 1, description=f"Address failure: {reason[:50]}..."),
+            PlanStep(step_id=len(plan.steps) + 2, description="Retry failed step with alternative approach"),
+            PlanStep(step_id=len(plan.steps) + 3, description="Verify recovery and continue"),
+        ]

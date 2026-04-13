@@ -1,215 +1,324 @@
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
-from langchain_openai import ChatOpenAI
-from app.core.config import ZHIPU_API_KEY
-from app.tools.schedule_tool import create_schedule, get_all_schedules, update_schedule, delete_schedule
-from app.tools.wiki_tool import (
-    create_wiki,
-    get_all_wikis,
-    search_wiki,
-    get_wiki_detail,
-    delete_wiki
-)
-from app.tools.code_tool import (
-    create_code_problem,
-    list_code_problems,
-    get_problem_detail,
-    submit_and_grade_code,
-    get_user_ability_profile
-)
-from app.tools.learning_path_tool import (
-    create_learning_path,
-    start_learning_path,
-    complete_current_step,
-    get_learning_path_progress,
-    list_learning_paths,
-    get_learning_path_detail,
-    recommend_next_learning
-)
-from app.tools.plan_and_execute_tool import (
-    create_learning_plan,
-    preview_learning_plan
-)
-from app.agent.prompt import SYSTEM_PROMPT
-import re
+# ============================================================
+# 主 Agent 编排模块
+# ============================================================
+# 将所有 Agent 组件编排成一个内聚系统。
+# 实现主执行循环。
+#
+# 架构:
+#   目标 -> 规划器 -> ReAct 循环 -> 观察 -> 反思 -> 记忆
+#
+# Console Output:
+#   - Comprehensive execution trace
+#   - State transitions
+#   - Module interactions
+# ============================================================
 
-ALL_TOOLS = [
-    create_schedule, get_all_schedules, update_schedule, delete_schedule,
-    create_wiki, get_all_wikis, search_wiki, get_wiki_detail, delete_wiki,
-    create_code_problem, list_code_problems, get_problem_detail,
-    submit_and_grade_code, get_user_ability_profile,
-    create_learning_plan, preview_learning_plan,
-    create_learning_path, start_learning_path, complete_current_step,
-    get_learning_path_progress, list_learning_paths, get_learning_path_detail,
-    recommend_next_learning
-]
+from typing import Dict, Any, Optional
+from datetime import datetime
+
+# Import agent components
+from app.agent.planner import Planner, Plan
+from app.agent.react import ReActEngine, ReActStep
+from app.agent.reflexion import Reflexion, ReflectionResult
+from app.agent.memory import Memory, get_memory
+from app.agent.state import StateManager, AgentState
+
+# Import core modules
+from app.core.config import Config, get_config
+from app.core.context import ExecutionContext, create_context, get_context
+from app.core.llm import get_llm
 
 
-def parse_response(text):
+class Agent:
     """
-    解析模型输出，提取 ReAct 各组件。
+    主 Agent 编排器。
 
-    标准 ReAct 每次只输出一个组件（Thought / Action / Final Answer）。
-    因此解析逻辑如下：
+    协调所有模块自主执行任务:
+    - Planner: 目标分解
+    - ReAct: 行动决策和执行
+    - Reflexion: 错误自我反思
+    - Memory: 经验存储和检索
+    - State: 状态管理和转换
 
-    1. 先找 Thought（推理）
-    2. 再找 Action + Action Input（行动）
-    3. 最后找 Final Answer（结束）
-    """
-    # re.DOTALL 让 . 能匹配换行符，否则多行内容会截断
-    thought = re.search(r"Thought:(.*)", text, re.DOTALL)
-    action = re.search(r"Action:(.*)", text)
-    action_input = re.search(r"Action Input:(.*)", text)
-    # Final Answer 可能包含多行 markdown，务必加 re.DOTALL
-    final = re.search(r"Final Answer:(.*)", text, re.DOTALL)
-
-    return {
-        # Thought 可能是多行的，取第一行作为当前推理
-        "thought": thought.group(1).strip() if thought else None,
-        # Action 和 Action Input 必须同时出现才有效
-        "action": action.group(1).strip() if action else None,
-        "action_input": action_input.group(1).strip() if action_input else None,
-        "final": final.group(1).rstrip() if final else None,
-    }
-
-
-def execute_tool(action: str, action_input: str) -> str:
-    """根据 action 名称和参数执行对应工具，返回原始结果。"""
-    try:
-        # 将 JSON 字符串解析为字典
-        args = eval(action_input)
-    except Exception as e:
-        return f"参数解析失败: {e}"
-
-    for tool in ALL_TOOLS:
-        if tool.name == action:
-            return tool.invoke(args)
-
-    return f"未找到工具: {action}"
-
-
-def create_agent():
-    """
-    【ReAct Agent 工厂函数】
-
-    创建的 agent 使用 ReAct 模式：
-    1. 模型输出 Thought（思考）
-    2. 根据 Thought 决定是否需要执行 Action（工具调用）
-    3. 执行工具后获得 Observation（观察结果）
-    4. 用 Observation 更新上下文，重复直到 Final Answer
-
-    每次调用 agent() 是一次完整的 ReAct 推理过程。
+    Attributes:
+        config: Agent 配置
+        planner: 规划模块
+        react: ReAct 引擎
+        reflexion: 反思模块
+        memory: 记忆系统
+        state: 状态管理器
+        context: 执行上下文
     """
 
-    def agent(input_text: str, conversation_history: list = None, verbose: bool = True) -> str:
-        model = ChatOpenAI(
-            model="glm-5.1",
-            openai_api_key=ZHIPU_API_KEY,
-            openai_api_base="https://open.bigmodel.cn/api/paas/v4",
-            temperature=0
+    def __init__(self, config: Optional[Config] = None):
+        """
+        Initialize the Agent.
+
+        Args:
+            config: Optional configuration object. Loads from env if None.
+        """
+        # Load configuration
+        self.config = config or get_config()
+
+        print("\n" + "=" * 60)
+        print("[AGENT] Agent Initialization")
+        print("=" * 60)
+
+        # Initialize core LLM first
+        self.llm = get_llm()
+
+        # Initialize agent components
+        print("\n[PKG] Initializing components...")
+
+        self.planner = Planner()
+        self.react = ReActEngine(max_retries=self.config.agent.max_retries)
+        self.reflexion = Reflexion(enabled=self.config.agent.enable_reflexion)
+        self.memory = get_memory(
+            enabled=self.config.agent.enable_memory,
+            memory_dir=self.config.memory.memory_dir,
         )
+        self.state = StateManager()
 
-        # ========== [Context Injection] 获取用户能力上下文 ==========
-        from app.core.context import get_current_user_id
-        from app.tools.code_tool import get_user_ability_profile
-        user_id = get_current_user_id()
-        ability_context = ""
-        if user_id:
-            try:
-                ability_context = get_user_ability_profile()
-            except:
-                ability_context = ""
+        self.context: Optional[ExecutionContext] = None
 
-        # ========== [Context Injection] 初始化对话 ==========
-        # 如果有用户能力信息，先注入作为上下文
-        if ability_context and ability_context != "用户未登录":
-            context_msg = HumanMessage(content=f"[用户能力背景]\n{ability_context}\n\n请在回答时结合上述用户能力背景，对基础薄弱的知识点多加解释。")
-            messages = [
-                SystemMessage(content=SYSTEM_PROMPT),
-                context_msg,
-            ]
-        else:
-            messages = [
-                SystemMessage(content=SYSTEM_PROMPT),
-            ]
+        print("\n[OK] Agent initialized successfully")
+        self._print_startup_banner()
 
-        # 【Memory】添加对话历史（实现跨消息记忆）
-        if conversation_history:
-            for msg in conversation_history:
-                role = msg.get("role", "user")
-                content = msg.get("content", "")
-                if role == "user":
-                    messages.append(HumanMessage(content=content))
-                elif role == "assistant":
-                    messages.append(HumanMessage(content=content))
+    def _print_startup_banner(self) -> None:
+        """Print startup banner with agent info."""
+        print("\n" + "=" * 60)
+        print("[RUN] Autonomous Agent Core v1.0.0")
+        print("=" * 60)
+        print("\n[INFO] Capabilities:")
+        print("   [+] Goal decomposition and planning")
+        print("   [+] ReAct-style reasoning and action")
+        print("   [+] Self-reflection on errors")
+        print("   [+] Memory (short-term + long-term)")
+        print("   [+] Dynamic replanning")
 
-        # 【User Input】添加当前消息
-        messages.append(HumanMessage(content=input_text))
+        print("\n[FIX] Configuration:")
+        print(f"   Max Steps:     {self.config.agent.max_steps}")
+        print(f"   Max Retries:   {self.config.agent.max_retries}")
+        print(f"   Replan After:  {self.config.agent.replan_threshold} failures")
+        print(f"   LLM Model:     {self.config.llm.model}")
+        print(f"   LLM Available:  {'Yes' if self.llm.is_available() else 'No (Demo Mode)'}")
 
-        # ========== [ReAct Loop] 开始 ReAct 推理循环 ==========
-        max_steps = 15  # ReAct 需要多轮推理，增加步数上限
+        print("\n" + "=" * 60 + "\n")
 
-        for step in range(max_steps):
-            # 【ReAct Step】模型输出 Thought
-            ai_msg = model.invoke(messages)
-            content = ai_msg.content
-            messages.append(ai_msg)
+    def run(self, goal: str) -> ExecutionContext:
+        """
+        运行 Agent 完成给定目标。
 
-            parsed = parse_response(content)
+        Args:
+            goal: 要完成的目标
 
-            # 【ReAct Verbose 输出】只显示关键链
-            if verbose:
-                print(f"\n--- Step {step + 1} ---")
-                # 截断长内容
-                if parsed["thought"]:
-                    thought = parsed["thought"][:100] + "..." if len(parsed["thought"]) > 100 else parsed["thought"]
-                    print(f"[Thought] {thought}")
-                if parsed["action"]:
-                    print(f"[Action] {parsed['action']}")
-                if parsed["action_input"]:
-                    args_preview = parsed["action_input"][:80] + "..." if len(parsed["action_input"]) > 80 else parsed["action_input"]
-                    print(f"[Action Input] {args_preview}")
-                if parsed["final"]:
-                    final_preview = parsed["final"][:100] + "..." if len(parsed["final"]) > 100 else parsed["final"]
-                    print(f"[Final] {final_preview}")
-                print("-" * 20)
+        Returns:
+            ExecutionContext: 最终执行上下文（包含历史）
+        """
+        print("\n" + "=" * 60)
+        print(f"[GOAL] AGENT STARTING: {goal[:80]}...")
+        print("=" * 60 + "\n")
 
-            # ========== 情况 1：模型直接输出 Final Answer，结束 ==========
-            if parsed["final"]:
-                return parsed["final"]
+        # Create execution context
+        self.context = create_context(goal)
+        self.state.reset()
 
-            # ========== 情况 2：模型输出 Thought + Action + Action Input ==========
-            # 执行工具，获取 Observation
-            if parsed["action"] and parsed["action_input"]:
-                tool_name = parsed["action"]
-                tool_args = parsed["action_input"]
+        # Generate initial plan
+        self.state.transition_to(AgentState.PLANNING, "Starting goal decomposition")
+        plan = self.planner.create_plan(goal, self.context)
+        self.context.plan = [step.model_dump() for step in plan.steps]
 
-                result = execute_tool(tool_name, tool_args)
+        # Main execution loop
+        self.state.transition_to(AgentState.EXECUTING, "Starting plan execution")
 
-                # ========== 关键区别 ==========
-                # 标准 ReAct：把 Observation 作为 ToolMessage 加回对话，
-                # 让模型在下一轮中自己推理（Thought）Observation 的含义，
-                # 然后决定是继续 Action 还是输出 Final Answer。
-                # 这样模型能"看到"Observation 并基于它继续思考。
-                messages.append(
-                    ToolMessage(content=result, tool_call_id=tool_name)
-                )
+        while not self.state.should_terminate(self.config.agent.max_steps):
+            self.state.increment_step()
 
-                if verbose:
-                    print(f"[Observation] {result}")
+            print(f"\n{'='*60}")
+            print(f"[STEP] STEP {self.state.step_count}")
+            print(f"{'='*60}")
 
-                # 不要自动跳到下一轮，让模型先推理 Observation
-                # 继续循环，模型会输出下一个 Thought
+            # Check if plan needs replanning
+            if plan.needs_replan:
+                print("\n[!]  Plan needs replanning...")
+                self.state.transition_to(AgentState.REPLANNING, plan.replan_reason)
+                plan = self.planner.replan(plan, plan.replan_reason or "Unknown reason", self.context)
+                self.context.plan = [step.model_dump() for step in plan.steps]
+                self.state.transition_to(AgentState.EXECUTING, "Replan complete")
 
-            # ========== 情况 3：只有 Thought，没有 Action ==========
-            # 这说明模型在推理阶段，还没有决定下一步做什么
-            # 这种情况不应该在标准 ReAct 中出现，因为我们要求每次都输出 Action
-            # 如果出现，可能是模型误解了格式，提示它继续
-            elif parsed["thought"] and not parsed["action"]:
-                # 要求模型输出 Action
-                messages.append(
-                    HumanMessage(content="你已经有了 Thought，现在请输出 Action 和 Action Input。")
-                )
+            # Check if plan is complete
+            if plan.is_complete():
+                print("\n[OK] Plan completed successfully")
+                self.state.transition_to(AgentState.COMPLETED, "All steps completed")
+                break
 
-        return "已达到最大步数限制"
+            # Get current step
+            current_step = plan.get_next_step()
+            if not current_step:
+                break
 
-    return agent
+            # Decide action using ReAct
+            react_step = self.react.decide_action(plan, self.context)
+
+            # Store step in context
+            step_record = self.context.add_step(
+                thought=react_step.thought,
+                action=react_step.action,
+                action_args=react_step.action_args,
+                observation="",
+            )
+
+            # Update plan status
+            current_step.status = "in_progress"
+
+            # Execute action
+            observation = self.react.execute_action(react_step)
+
+            # Update context
+            self.context.update_last_step(observation, "success" if not observation.startswith("ERROR") else "failure")
+
+            # Process observation
+            analysis = self.react.process_observation(observation, self.context)
+
+            # Update memory
+            self.memory.update_short_term(
+                action=react_step.action,
+                observation=observation,
+                error=observation if observation.startswith("ERROR") else None,
+            )
+            self.memory.add_step_to_history({
+                "step": self.state.step_count,
+                "action": react_step.action,
+                "observation": observation,
+                "timestamp": datetime.now().isoformat(),
+            })
+
+            # Handle failures
+            if not analysis["success"]:
+                self.context.increment_failures()
+                plan.mark_step_failed(current_step.step_id, observation)
+
+                print(f"\n[X] Step failed (consecutive failures: {self.context.consecutive_failures})")
+
+                # Check if we should replan
+                if self.context.consecutive_failures >= self.config.agent.replan_threshold:
+                    plan.needs_replan = True
+                    plan.replan_reason = f"Exceeded failure threshold ({self.context.consecutive_failures})"
+
+                # Trigger reflection
+                if self.config.agent.enable_reflexion:
+                    self.state.transition_to(AgentState.REFLECTING, "Handling failure")
+                    reflection = self.reflexion.reflect(
+                        error=observation,
+                        context=self.context,
+                        level="L2",
+                    )
+
+                    # Learn from reflection
+                    if reflection.lesson:
+                        fix = reflection.fix_suggestions[0].action if reflection.fix_suggestions else "unknown"
+                        self.memory.learn_from_error(
+                            error=observation,
+                            fix=fix,
+                            success=False,
+                        )
+
+                    self.state.transition_to(AgentState.EXECUTING, "Reflection complete")
+            else:
+                # Success
+                self.context.reset_failures()
+                plan.mark_step_complete(current_step.step_id, observation)
+                print(f"\n[OK] Step completed successfully")
+
+            # Check for termination
+            if plan.is_complete():
+                self.state.transition_to(AgentState.COMPLETED, "Goal achieved")
+                break
+
+        # Handle loop termination
+        if self.state.current_state not in [AgentState.COMPLETED, AgentState.FAILED]:
+            if self.state.step_count >= self.config.agent.max_steps:
+                self.state.transition_to(AgentState.TERMINATED, f"Max steps reached ({self.config.agent.max_steps})")
+            else:
+                self.state.transition_to(AgentState.COMPLETED, "Loop ended")
+
+        # Mark context complete
+        self.context.mark_complete(self.state.current_state.value)
+
+        # Print final summary
+        self._print_final_summary()
+
+        return self.context
+
+    def _print_final_summary(self) -> None:
+        """
+        Print final execution summary.
+        """
+        if not self.context:
+            return
+
+        print("\n" + "=" * 60)
+        print("[STAT] FINAL EXECUTION SUMMARY")
+        print("=" * 60)
+
+        print(f"\n[GOAL] Goal: {self.context.goal}")
+
+        print(f"\n[PROGRESS] Status: {self.state.current_state.value.upper()}")
+        print(f"   Total Steps:    {self.state.step_count}")
+        print(f"   Duration:       {self.context.get_duration():.2f}s")
+        print(f"   Final Failures: {self.context.consecutive_failures}")
+
+        # Step summary
+        completed = len([s for s in self.context.steps if s.result == "success"])
+        failed = len([s for s in self.context.steps if s.result == "failure"])
+        print(f"\n[NOTE] Step Results:")
+        print(f"   Completed: {completed}")
+        print(f"   Failed:    {failed}")
+
+        # Print recent steps
+        if self.context.steps:
+            print(f"\n[INFO] Recent Steps:")
+            for step in self.context.steps[-5:]:
+                icon = "[OK]" if step.result == "success" else "[X]"
+                print(f"   {icon} Step {step.step_id}: {step.action}")
+
+        # Memory status
+        if self.config.agent.enable_memory:
+            print(f"\n[BRAIN] Memory:")
+            print(f"   Short-term entries: {len(self.memory.short_term.recent_steps)}")
+            print(f"   Long-term entries:  {len(self.memory.long_term)}")
+
+        print("\n" + "=" * 60)
+        print("[END] Agent Execution Complete")
+        print("=" * 60 + "\n")
+
+    def get_status(self) -> Dict[str, Any]:
+        """
+        Get current agent status.
+
+        Returns:
+            Dict with status information
+        """
+        return {
+            "state": self.state.current_state.value,
+            "step_count": self.state.step_count,
+            "context": self.context.model_dump() if self.context else None,
+            "memory": {
+                "short_term_size": len(self.memory.short_term.recent_steps),
+                "long_term_size": len(self.memory.long_term),
+            },
+        }
+
+
+# ============================================================
+# Factory Function
+# ============================================================
+
+def create_agent() -> Agent:
+    """
+    Create a new Agent instance.
+
+    Returns:
+        Agent: New agent instance
+    """
+    return Agent()

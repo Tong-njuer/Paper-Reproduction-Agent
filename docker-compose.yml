@@ -1,14 +1,83 @@
-version: "3.9"
+# ============================================================
+# Docker Compose Configuration
+# ============================================================
+# Purpose: One-click deployment for the Agent Core
+# Platform: Windows 11 compatible
 
+version: '3.8'
+
+# ============================================================
+# Services Definition
+# ============================================================
 services:
+  # ----------------------------------------------------------
+  # Agent Core Service
+  # ----------------------------------------------------------
   agent:
-    build: .
-    container_name: coding-coach-agent
-    env_file:
-      - .env
-    ports:
-      - "8501:8501"
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agent_core
+    # Restart policy for production reliability
+    restart: unless-stopped
+    # Environment variables
+    environment:
+      # Anthropic API Configuration
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Agent Configuration
+      - AGENT_MAX_STEPS=${AGENT_MAX_STEPS:-50}
+      - AGENT_MODE=${AGENT_MODE:-demo}
+      # Logging Level
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    # Volume mounts for persistent memory and logs
     volumes:
-      - ./workspace:/app/workspace
+      - ./data/memory:/app/data/memory
+      - ./data/logs:/app/data/logs
+    # Standard I/O for container logs
     stdin_open: true
     tty: true
+    # Network configuration
+    networks:
+      - agent_network
+
+  # ----------------------------------------------------------
+  # Optional: Streamlit Web UI
+  # ----------------------------------------------------------
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agent_ui
+    # Only start if UI is needed
+    profiles:
+      - ui
+    restart: unless-stopped
+    command: streamlit run app/streamlit_app.py
+    ports:
+      - "8501:8501"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    volumes:
+      - ./data/memory:/app/data/memory
+      - ./data/logs:/app/data/logs
+    depends_on:
+      - agent
+    networks:
+      - agent_network
+
+# ============================================================
+# Networks
+# ============================================================
+networks:
+  agent_network:
+    driver: bridge
+    name: agent_core_network
+
+# ============================================================
+# Volumes (Persistent Data)
+# ============================================================
+volumes:
+  memory_data:
+    name: agent_memory
+  logs_data:
+    name: agent_logs

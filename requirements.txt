@@ -1,8 +1,16 @@
-numpy<2.0
-langchain==0.3.28
-langchain-openai==0.2.14
-langchain-community==0.3.28
-python-dotenv
-sqlalchemy
-pydantic
-streamlit
+# ============================================================
+# Agent Core Dependencies
+# ============================================================
+# Core Framework
+pydantic>=2.0.0
+pyyaml>=6.0
+
+# LLM Integration (Zhipu AI GLM API)
+requests>=2.28.0
+
+# Logging and Visualization
+loguru>=0.7.0
+rich>=13.0.0
+
+# Utilities
+python-dotenv>=1.0.0
