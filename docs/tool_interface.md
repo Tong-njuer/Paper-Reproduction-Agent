@@ -8,13 +8,19 @@
 
 ## 1. 文件结构
 
-```
+```text
 app/tools/
 ├── __init__.py          # 工具基类和注册表（已存在）
-├── code_tool.py         # 代码执行工具 [待实现]
-├── wiki_tool.py         # 文档搜索工具 [待实现]
-├── schedule_tool.py     # 计划管理工具 [待实现]
-└── learning_path_tool.py # 学习路径工具 [待实现]
+├── paper_tool.py        # 论文读取与结构化抽取
+├── source_tool.py       # 源码候选发现/下载/完整性分析
+├── repo_index_tool.py   # 仓库索引、检索、文件读取
+├── sandbox_tool.py      # 沙箱工作区与环境准备
+├── test_tool.py         # 静态检查/单测/烟雾测试/指标对比
+├── doc_tool.py          # 文档写入与复现报告生成
+├── code_tool.py         # 代码执行工具
+├── wiki_tool.py         # 文档搜索工具
+├── schedule_tool.py     # 计划管理工具
+└── learning_path_tool.py # 学习路径工具
 ```
 
 ---
@@ -151,6 +157,7 @@ ReAct 引擎通过 `action_args` 字典传递参数：
 ```
 
 框架调用方式：
+
 ```python
 tool = get_tool(action_name)          # 从注册表获取工具
 result = tool.execute(**action_args)  # 解包传递参数
@@ -180,6 +187,7 @@ TOOL_REGISTRY: Dict[str, BaseTool] = {
 ## 6. 返回值规范
 
 ### 6.1 成功情况
+
 ```python
 ToolResult(
     success=True,
@@ -189,6 +197,7 @@ ToolResult(
 ```
 
 ### 6.2 失败情况
+
 ```python
 ToolResult(
     success=False,
@@ -197,6 +206,7 @@ ToolResult(
 ```
 
 ### 6.3 重要提示
+
 - `success=True` 时 `error` 应为 `None`
 - `success=False` 时 `output` 可选（通常为 `None`）
 - 避免返回空字符串作为错误信息
@@ -205,12 +215,18 @@ ToolResult(
 
 ## 7. 已有工具占位符
 
-| 工具名称 | 描述 | 状态 |
-|---------|------|------|
-| `code_tool` | 执行代码 | 待实现 |
-| `wiki_tool` | 文档搜索 | 待实现 |
-| `schedule_tool` | 计划管理 | 待实现 |
-| `learning_path_tool` | 学习路径 | 待实现 |
+| 工具名称             | 描述                             | 状态   |
+| -------------------- | -------------------------------- | ------ |
+| `paper_tool`         | 论文读取与复现要素抽取           | 已实现 |
+| `source_tool`        | 源码候选发现、下载与完整性分析   | 已实现 |
+| `repo_index_tool`    | 仓库目录索引、文本检索、文件读取 | 已实现 |
+| `sandbox_tool`       | 运行工作区创建与环境准备         | 已实现 |
+| `test_tool`          | 测试执行与指标对比               | 已实现 |
+| `doc_tool`           | 文档与复现报告生成               | 已实现 |
+| `code_tool`          | 执行代码                         | 已实现 |
+| `wiki_tool`          | 文档搜索                         | 已实现 |
+| `schedule_tool`      | 计划管理                         | 已实现 |
+| `learning_path_tool` | 学习路径                         | 已实现 |
 
 ---
 
@@ -244,12 +260,14 @@ def test_code_tool_failure():
 
 LLM 通过工具描述理解每个工具的能力。在 `app/agent/react.py` 的 `_build_decision_prompt` 中会传递：
 
-```
+```text
 Available Tools:
+paper_tool, source_tool, repo_index_tool, sandbox_tool, test_tool, doc_tool,
 code_tool, wiki_tool, schedule_tool, learning_path_tool
 ```
 
 因此 `BaseTool.description` 必须清晰描述：
+
 - 工具能做什么
 - 需要什么参数
 - 返回什么结果
@@ -282,3 +300,40 @@ def execute(self, **kwargs) -> ToolResult:
 3. 实现 `execute` 方法
 4. 返回 `ToolResult`
 5. 注册到 `TOOL_REGISTRY`
+
+---
+
+## 12. 新工具 Action 参数模板
+
+为提升 ReAct 决策稳定性，建议按以下模板生成 `action_args`：
+
+```json
+{
+    "paper_tool": {"action": "extract", "text": "..."},
+    "source_tool": {"action": "analyze_source", "source_path": "..."},
+    "repo_index_tool": {"action": "search_text", "root_path": "...", "query": "..."},
+    "sandbox_tool": {"action": "detect_environment", "project_path": "..."},
+    "test_tool": {"action": "run_unit_tests", "project_path": "..."},
+    "doc_tool": {"action": "generate_repro_report", "output_path": "...", "goal": "..."}
+}
+```
+
+说明：
+
+- `paper_tool/source_tool/repo_index_tool/sandbox_tool/test_tool/doc_tool/schedule_tool` 都是多 action 工具，务必显式传 `action`。
+- `code_tool/wiki_tool/learning_path_tool` 可直接传主参数。
+
+---
+
+## 13. 本地安装与测试
+
+```bash
+pip install -r requirements.txt
+python -m unittest discover -s tests -v
+```
+
+UI 启动：
+
+```bash
+streamlit run app/streamlit_app.py
+```

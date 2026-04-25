@@ -61,7 +61,7 @@ def main():
 
         goal = st.text_area(
             "Enter the goal for the agent:",
-            value="Reproduce paper 'Attention Is All You Need' Transformer model",
+            value="复现论文：Minimal learning machine for multi-label learning",
             height=100,
         )
 

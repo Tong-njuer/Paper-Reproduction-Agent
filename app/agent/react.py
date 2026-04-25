@@ -223,6 +223,7 @@ class ReActEngine:
 
         # Available tools
         available_tools = ", ".join(TOOL_REGISTRY.keys())
+        tool_guide = self._build_tool_usage_guide()
 
         prompt = f"""You are a reasoning agent in a ReAct loop. Given the current situation, decide the next action.
 
@@ -237,8 +238,17 @@ Recent History:
 Available Tools:
 {available_tools}
 
+Tool Usage Guide (action-specific argument templates):
+{tool_guide}
+
 Your task is to decide WHAT action to take (not how to implement it).
 Choose the most appropriate tool and arguments to advance the plan.
+
+Hard constraints:
+1. "action" MUST be one of the available tools above.
+2. "action_args" MUST be a JSON object.
+3. If a tool needs an "action" field (e.g., paper_tool/source_tool/repo_index_tool/sandbox_tool/test_tool/doc_tool/schedule_tool), include it explicitly.
+4. Prefer minimal required args first, avoid fabricated paths.
 
 Output format (JSON):
 {{
@@ -249,6 +259,19 @@ Output format (JSON):
 
 Choose action that will help complete the current step description."""
         return prompt
+
+    def _build_tool_usage_guide(self) -> str:
+        """构建工具参数模板，帮助 LLM 输出稳定可执行的 action_args。"""
+        return """- paper_tool: {\"action\": \"extract\", \"text\": \"...\"} | {\"action\": \"extract_from_pdf\", \"pdf_path\": \"...\"}
+- source_tool: {\"action\": \"discover_candidates\", \"text\": \"...\"} | {\"action\": \"analyze_source\", \"source_path\": \"...\"}
+- repo_index_tool: {\"action\": \"summarize_repo\", \"root_path\": \"...\"} | {\"action\": \"search_text\", \"root_path\": \"...\", \"query\": \"...\"}
+- sandbox_tool: {\"action\": \"create_workspace\", \"user_id\": \"user_1\"} | {\"action\": \"detect_environment\", \"project_path\": \"...\"}
+- test_tool: {\"action\": \"run_unit_tests\", \"project_path\": \"...\"} | {\"action\": \"compare_metrics\", \"expected\": {...}, \"actual\": {...}}
+- doc_tool: {\"action\": \"generate_repro_report\", \"output_path\": \"...\", \"goal\": \"...\"}
+- schedule_tool: {\"action\": \"create_plan\", \"goal\": \"...\", \"tasks\": [\"...\"]}
+- code_tool: {\"command\": \"python --version\", \"timeout\": 30}
+- wiki_tool: {\"query\": \"transformer\", \"lang\": \"en\"}
+- learning_path_tool: {\"topic\": \"paper reproduction\", \"level\": \"beginner\", \"weeks\": 4}"""
 
     def _parse_decision(
         self,
@@ -265,10 +288,19 @@ Choose action that will help complete the current step description."""
         Returns:
             ReActStep: Parsed decision
         """
+        action = str(response.get("action", "idle"))
+        action_args = response.get("action_args", {})
+
+        if action not in TOOL_REGISTRY and action != "idle":
+            action = "idle"
+
+        if not isinstance(action_args, dict):
+            action_args = {}
+
         return ReActStep(
-            thought=response.get("thought", "No thought provided"),
-            action=response.get("action", "idle"),
-            action_args=response.get("action_args", {}),
+            thought=str(response.get("thought", "No thought provided")),
+            action=action,
+            action_args=action_args,
         )
 
     def _create_fallback_decision(self, current_step: PlanStep) -> ReActStep:

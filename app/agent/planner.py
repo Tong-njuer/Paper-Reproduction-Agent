@@ -32,6 +32,10 @@ class PlanStep(BaseModel):
     status: str = "pending"
     depends_on: List[int] = Field(default_factory=list)
     result: Optional[str] = None
+    tool_hint: Optional[str] = None
+    expected_artifact: Optional[str] = None
+    acceptance_criteria: Optional[str] = None
+    fallback_strategy: Optional[str] = None
 
 
 class Plan(BaseModel):
@@ -126,6 +130,13 @@ class Plan(BaseModel):
             indent = "  " if step.depends_on else ""
 
             print(f"{icon} {indent}Step {step.step_id}: {step.description}")
+
+            if step.tool_hint:
+                print(f"   {indent}Tool Hint: {step.tool_hint}")
+            if step.expected_artifact:
+                print(f"   {indent}Expected Artifact: {step.expected_artifact}")
+            if step.acceptance_criteria:
+                print(f"   {indent}Acceptance: {step.acceptance_criteria[:80]}...")
 
             if step.result:
                 print(f"   {indent}Result: {step.result[:50]}...")
@@ -245,14 +256,31 @@ Requirements:
 2. Steps should be ordered logically (dependencies first)
 3. Focus on the essential steps needed to achieve the goal
 4. Do NOT specify HOW to do things, only WHAT to do
+5. Include tool_hint and expected_artifact for each step when possible
+6. Include acceptance_criteria and fallback_strategy for high-risk steps
 
 Output format (JSON):
 {{
     "steps": [
-        {{"step_id": 1, "description": "Step description", "depends_on": []}},
-        {{"step_id": 2, "description": "Step description", "depends_on": [1]}}
+        {{
+          "step_id": 1,
+          "description": "Step description",
+          "depends_on": [],
+          "tool_hint": "paper_tool",
+          "expected_artifact": "paper_spec.json",
+          "acceptance_criteria": "...",
+          "fallback_strategy": "..."
+        }}
     ]
 }}
+"""
+
+        if any(keyword in goal.lower() for keyword in ["论文", "paper", "reproduce", "复现"]):
+            base_prompt += """
+
+Domain Hint (paper reproduction):
+- Prefer lifecycle steps: paper ingestion -> source acquisition -> repo analysis -> sandbox prep -> testing -> documentation.
+- Prefer tool hints from: paper_tool, source_tool, repo_index_tool, sandbox_tool, test_tool, doc_tool.
 """
 
         if context and context.metadata.get("history"):
@@ -328,6 +356,10 @@ Output format (JSON):
                     step_id=item.get("step_id", len(steps) + 1),
                     description=item.get("description", "No description"),
                     depends_on=item.get("depends_on", []),
+                    tool_hint=item.get("tool_hint"),
+                    expected_artifact=item.get("expected_artifact"),
+                    acceptance_criteria=item.get("acceptance_criteria"),
+                    fallback_strategy=item.get("fallback_strategy"),
                 )
             )
         return steps

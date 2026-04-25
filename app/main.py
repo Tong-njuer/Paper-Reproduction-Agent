@@ -85,7 +85,7 @@ def run_demo_mode():
     print("\nRunning with a sample paper reproduction goal...\n")
 
     # Demo goal
-    demo_goal = "Reproduce paper 'Attention Is All You Need' Transformer model"
+    demo_goal = "复现论文：Minimal learning machine for multi-label learning"
 
     # Override max steps for demo
     config = get_config()
