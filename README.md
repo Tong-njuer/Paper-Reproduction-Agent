@@ -1,23 +1,3 @@
-# Agent Demo（论文复现方向）
-
-## 快速开始
-
-请先阅读 [docs/getting_started.md](docs/getting_started.md)，按文档完成：
-
-1. 安装依赖
-2. 运行测试
-3. 启动 CLI 或 Streamlit UI
-
-推荐最小命令：
-
-```bash
-pip install -r requirements.txt
-python -m unittest discover -s tests -v
-python -m app.main --mode demo
-```
-
----
-
 # 📘 Autonomous Agent Core 设计说明书（无 Tool 部分）
 
 ---
