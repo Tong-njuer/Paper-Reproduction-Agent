@@ -106,7 +106,7 @@ def _run_clone_in_thread(repo_url: str, branch: str = ""):
     clone_log("完成" if result.success else f"失败: {result.error}")
 
 
-# ── render helpers — take data as explicit args ───────────────────
+# ── render helpers ───────────────────────────────────────────────
 
 def render_terminal(logs: list):
     lines = []
@@ -166,98 +166,19 @@ def render_steps(steps: list):
             st.info(f"🔄 重新规划: {len(data.get('steps', []))} 个新步骤")
 
 
-def render_result(r: dict):
-    if not r:
-        return
-    st.divider()
-    st.subheader("执行结果")
-    if r["success"]:
-        st.success(f"✅ {r['summary']}")
-    else:
-        st.error(f"❌ {r['summary']}")
-    if r.get("source_url"):
-        st.info(f"**源码地址**: [{r['source_url']}]({r['source_url']})")
-    if r.get("paper_info", {}).get("urls"):
-        st.markdown("**论文链接**:")
-        for url in r["paper_info"]["urls"][:5]:
-            st.markdown(f"- [{url}]({url})")
-    if r.get("errors"):
-        with st.expander(f"⚠️ 错误详情 ({len(r['errors'])} 个)", expanded=False):
-            for err in r["errors"]:
-                st.caption(f"- {err[:200]}")
-
-
-def render_clone_section(source_url: str, store: dict):
-    """Show clone prompt and handle clone flow if source_url found."""
-    if not source_url:
-        return
-
-    st.divider()
-    st.subheader("📥 源码仓库")
-
-    clone_status = store.get("clone_status")
-
-    if clone_status is None:
-        # Haven't started — show prompt
-        st.success(f"已找到源码仓库: {source_url}")
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("📥 克隆仓库到工作区", use_container_width=True, type="primary"):
-                t = threading.Thread(
-                    target=_run_clone_in_thread,
-                    args=(source_url, ""),  # empty branch → auto-detect
-                    daemon=True,
-                )
-                t.start()
-                st.rerun()
-        with c2:
-            # Let user scroll down to chat, or we could use an anchor
-            st.caption("💬 你也可以在下方对论文内容提问")
-
-    elif clone_status == "running":
-        st.info(f"⏳ 正在克隆: {source_url}")
-        logs = store.get("clone_logs", [])
-        st.code("\n".join(logs[-20:]) if logs else "准备中...", language="text")
-        time.sleep(1)
-        st.rerun()
-
-    elif clone_status == "done":
-        cr = store.get("clone_result", {})
-        st.success(f"✅ 克隆成功!")
-        st.code(cr.get("output", ""), language="text")
-        path = cr.get("local_path", "")
-        if path:
-            st.info(f"📂 本地路径: `{path}`")
-
-    elif clone_status == "error":
-        cr = store.get("clone_result", {})
-        st.error(f"❌ 克隆失败: {cr.get('error', '未知错误')}")
-
-
-def render_chat(paper_content: str):
-    st.divider()
-    st.subheader("💬 论文问答")
-    if not paper_content:
-        st.caption("未获取到论文内容，无法问答")
-        return
-
-    for msg in st.session_state.chat_messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-
-    user_q = st.chat_input("关于这篇论文，你想问什么？")
-    if not user_q:
-        return
-
-    st.session_state.chat_messages.append({"role": "user", "content": user_q})
-    with st.chat_message("user"):
-        st.markdown(user_q)
-
-    with st.chat_message("assistant"):
-        with st.spinner("思考中..."):
-            answer = _ask_llm_about_paper(user_q, paper_content)
-        st.markdown(answer)
-    st.session_state.chat_messages.append({"role": "assistant", "content": answer})
+def _compute_progress(steps: list) -> tuple[int, int]:
+    """Return (completed, total) from steps list."""
+    completed = sum(
+        1 for s in steps
+        if s["type"] == "observation" and s.get("status") == "success"
+    )
+    plan_steps = []
+    for s in steps:
+        if s["type"] == "plan":
+            plan_steps = s.get("steps", [])
+            break
+    total = len(plan_steps) or 4
+    return completed, total
 
 
 def _ask_llm_about_paper(question: str, paper_content: str) -> str:
@@ -278,7 +199,198 @@ def _ask_llm_about_paper(question: str, paper_content: str) -> str:
         return f"问答出错: {e}"
 
 
-# ── main ────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════
+# Left column: 对话区
+# ═══════════════════════════════════════════════════════════════════
+
+def _render_left_idle():
+    """Left column idle state — prompt user to start."""
+    st.info("👆 请输入论文名称并点击「开始复现」")
+    st.caption("Agent 将自动搜索论文、阅读内容、定位源码并尝试复现。")
+
+
+def _render_left_running(store):
+    """Left column during agent execution — spinner + brief progress."""
+    steps = store["steps"]
+    completed, total = _compute_progress(steps)
+
+    # Brief progress indicator
+    st.progress(
+        min(completed / max(total, 1), 1.0),
+        text=f"Agent 正在执行: {completed}/{total}",
+    )
+
+    # Extract plan steps for status display
+    plan_steps = []
+    for s in steps:
+        if s["type"] == "plan":
+            plan_steps = s.get("steps", [])
+            break
+
+    # Show current phase
+    with st.spinner("Agent 思考与执行中…"):
+        if not steps:
+            st.caption("⏳ 初始化中…")
+        else:
+            latest = steps[-1]
+            t = latest.get("type", "")
+            if t == "plan":
+                st.caption(f"📋 已规划 {len(plan_steps)} 个步骤")
+            elif t == "step_start":
+                st.caption(f"▶️ 正在执行: {latest.get('description', '')[:100]}")
+            elif t == "react":
+                st.caption(f"💭 {latest.get('thought', '')[:150]}")
+            elif t == "observation":
+                if latest.get("status") == "success":
+                    st.caption(f"✅ 步骤{latest.get('step_id', '')}完成")
+                else:
+                    st.caption(f"❌ 步骤{latest.get('step_id', '')}失败，尝试修复…")
+            elif t == "reflection":
+                st.caption("🤔 分析错误中…")
+            elif t == "replan":
+                st.caption("🔄 调整计划…")
+            else:
+                st.caption("⚙️ 执行中…")
+
+        # Show plan overview if available
+        if plan_steps:
+            with st.expander("📋 执行计划概览", expanded=False):
+                for s in plan_steps:
+                    icon = "✅" if s["step_id"] <= completed else "⏳"
+                    st.markdown(f"{icon} **步骤{s['step_id']}**: {s['description']}")
+
+
+def _render_left_done(store):
+    """Left column after agent finishes — result + chat in scrollable container."""
+    result = store.get("result") or {}
+    paper_content = store.get("paper_content", "")
+
+    # ── scrollable content: result + clone + chat history ──
+    with st.container(height=550):
+        # Result summary
+        st.subheader("📋 执行结果")
+        if result.get("success"):
+            st.success(f"✅ {result.get('summary', '执行完成')}")
+        else:
+            st.error(f"❌ {result.get('summary', '执行失败')}")
+
+        if result.get("source_url"):
+            st.info(f"**源码地址**: [{result['source_url']}]({result['source_url']})")
+
+        if result.get("paper_info", {}).get("urls"):
+            st.markdown("**论文链接**:")
+            for url in result["paper_info"]["urls"][:5]:
+                st.markdown(f"- [{url}]({url})")
+
+        if result.get("errors"):
+            with st.expander(f"⚠️ 错误详情 ({len(result['errors'])} 个)", expanded=False):
+                for err in result["errors"]:
+                    st.caption(f"- {err[:200]}")
+
+        # Clone section
+        source_url = result.get("source_url", "")
+        if source_url:
+            _render_clone_inline(source_url, store)
+
+        # Chat history
+        st.divider()
+        st.subheader("💬 论文问答")
+        if not paper_content:
+            st.caption("未获取到论文内容，无法问答")
+        elif not st.session_state.chat_messages:
+            st.caption("在下方输入问题，基于论文内容进行问答。")
+        else:
+            for msg in st.session_state.chat_messages:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+
+    # ── chat input (below scrollable container, always visible) ──
+    if paper_content:
+        user_q = st.chat_input("关于这篇论文，你想问什么？")
+        if user_q:
+            st.session_state.chat_messages.append({"role": "user", "content": user_q})
+            with st.spinner("思考中…"):
+                answer = _ask_llm_about_paper(user_q, paper_content)
+            st.session_state.chat_messages.append({"role": "assistant", "content": answer})
+            st.rerun()
+
+
+def _render_clone_inline(source_url: str, store: dict):
+    """Render clone section inline (inside scrollable container)."""
+    st.divider()
+    st.subheader("📥 源码仓库")
+
+    clone_status = store.get("clone_status")
+
+    if clone_status is None:
+        st.success(f"已找到源码仓库: {source_url}")
+        if st.button("📥 克隆仓库到工作区", use_container_width=True, type="primary"):
+            t = threading.Thread(
+                target=_run_clone_in_thread,
+                args=(source_url, ""),
+                daemon=True,
+            )
+            t.start()
+            st.rerun()
+
+    elif clone_status == "running":
+        st.info(f"⏳ 正在克隆: {source_url}")
+        logs = store.get("clone_logs", [])
+        st.code("\n".join(logs[-20:]) if logs else "准备中...", language="text")
+        time.sleep(1)
+        st.rerun()
+
+    elif clone_status == "done":
+        cr = store.get("clone_result", {})
+        st.success("✅ 克隆成功!")
+        st.code(cr.get("output", ""), language="text")
+        path = cr.get("local_path", "")
+        if path:
+            st.info(f"📂 本地路径: `{path}`")
+
+    elif clone_status == "error":
+        cr = store.get("clone_result", {})
+        st.error(f"❌ 克隆失败: {cr.get('error', '未知错误')}")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Right column: 过程区
+# ═══════════════════════════════════════════════════════════════════
+
+def _render_right_process(store):
+    """Right column — scrollable process details (steps + terminal)."""
+    steps = store["steps"]
+    completed, total = _compute_progress(steps)
+
+    # Progress bar
+    st.progress(
+        min(completed / max(total, 1), 1.0),
+        text=f"进度: {completed}/{total}",
+    )
+
+    # Scrollable tabs
+    with st.container(height=550):
+        tab1, tab2 = st.tabs(["📋 执行步骤", "💻 终端输出"])
+        with tab1:
+            render_steps(steps)
+        with tab2:
+            render_terminal(store["logs"])
+
+
+def _render_right_idle():
+    """Right column placeholder when no task is running."""
+    st.info("等待任务开始…")
+    st.caption("输入论文名称并点击「开始复现」后，这里将实时展示：")
+    st.markdown("- 📋 **执行步骤** — Agent 的每一步操作详情")
+    st.markdown("- 💻 **终端输出** — 系统日志输出")
+    st.markdown("- 📊 **进度条** — 当前执行进度")
+    st.markdown("---")
+    st.caption("右侧内容独立滚动，不会影响左侧对话区。")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════════
 
 def main():
     st.title("🔬 论文复现助手")
@@ -315,93 +427,81 @@ def main():
             st.session_state.chat_messages = []
             st.rerun()
 
-    # ── input row ──
-    c1, c2 = st.columns([3, 1])
-    with c1:
-        goal = st.text_input(
-            "输入复现目标",
-            placeholder="例如：复现 Attention Is All You Need",
-            key="goal_input",
-            label_visibility="collapsed",
-        )
-    with c2:
-        is_running = run_state == "running"
-        run_clicked = st.button(
-            "开始复现", type="primary", use_container_width=True, disabled=is_running,
-        )
-
-    if run_clicked and not goal:
-        st.warning("请输入复现目标")
-
-    if run_clicked and goal:
-        # Reset shared store and session state
-        store["steps"] = []
-        store["logs"] = []
-        store["result"] = None
-        store["paper_content"] = ""
-        store["_done"] = False
-        store["clone_status"] = None
-        store["clone_result"] = None
-        store["clone_logs"] = []
-        st.session_state.run_state = "running"
-        st.session_state.goal_snapshot = goal
-        st.session_state.chat_messages = []
-
-        t = threading.Thread(target=_run_in_thread, args=(goal,), daemon=True)
-        t.start()
+    # ── Transition check: running → done ──
+    if run_state == "running" and store["_done"]:
+        st.session_state.result = store["result"]
+        st.session_state.paper_content = store["paper_content"]
+        st.session_state.run_state = "done"
         st.rerun()
 
-    # ── running: poll shared store, render directly ──
-    if run_state == "running":
-        # Thread finished?
-        if store["_done"]:
-            st.session_state.result = store["result"]
-            st.session_state.paper_content = store["paper_content"]
-            st.session_state.run_state = "done"
+    # ── Two-column layout ──
+    left, right = st.columns([1, 1])
+
+    # ====== LEFT: 对话区 ======
+    with left:
+        # Input row — always at top
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            goal = st.text_input(
+                "输入复现目标",
+                placeholder="例如：复现 Attention Is All You Need",
+                key="goal_input",
+                label_visibility="collapsed",
+            )
+        with c2:
+            is_running = run_state == "running"
+            run_clicked = st.button(
+                "开始复现", type="primary", use_container_width=True, disabled=is_running,
+            )
+
+        if run_clicked and not goal:
+            st.warning("请输入复现目标")
+
+        if run_clicked and goal:
+            # Reset shared store for new run
+            store["steps"] = []
+            store["logs"] = []
+            store["result"] = None
+            store["paper_content"] = ""
+            store["_done"] = False
+            store["clone_status"] = None
+            store["clone_result"] = None
+            store["clone_logs"] = []
+            st.session_state.run_state = "running"
+            st.session_state.goal_snapshot = goal
+            st.session_state.chat_messages = []  # new paper = new chat context
+
+            t = threading.Thread(target=_run_in_thread, args=(goal,), daemon=True)
+            t.start()
             st.rerun()
 
-        st.markdown(f"### ⚡ 执行中: {st.session_state.goal_snapshot}")
+        st.divider()
 
-        steps = store["steps"]
-        completed = sum(
-            1 for s in steps
-            if s["type"] == "observation" and s.get("status") == "success"
-        )
-        plan_steps = []
-        for s in steps:
-            if s["type"] == "plan":
-                plan_steps = s.get("steps", [])
-                break
-        total = len(plan_steps) or 4
-        st.progress(min(completed / max(total, 1), 1.0),
-                     text=f"进度: {completed}/{total} 步")
+        # State-dependent content
+        if run_state == "running":
+            st.markdown(f"### ⚡ 执行中: {st.session_state.goal_snapshot}")
+            _render_left_running(store)
 
-        tab1, tab2 = st.tabs(["执行步骤", "终端输出"])
-        with tab1:
-            render_steps(steps)
-        with tab2:
-            render_terminal(store["logs"])
+        elif run_state == "done":
+            st.markdown(f"### ✅ 完成: {st.session_state.goal_snapshot}")
+            _render_left_done(store)
 
+        else:
+            _render_left_idle()
+
+    # ====== RIGHT: 过程区 ======
+    with right:
+        st.subheader("📊 执行过程")
+
+        if run_state in ("running", "done"):
+            _render_right_process(store)
+        else:
+            _render_right_idle()
+
+    # ── Polling for running state ──
+    if run_state == "running":
         time.sleep(1.5)
         st.rerun()
-
-    # ── done: final result + clone + chat ──
-    if run_state == "done":
-        st.markdown(f"### 目标: {st.session_state.goal_snapshot}")
-
-        tab1, tab2, tab3 = st.tabs(["执行步骤", "终端输出", "执行结果"])
-        with tab1:
-            render_steps(store["steps"])
-        with tab2:
-            render_terminal(store["logs"])
-        with tab3:
-            render_result(store["result"])
-
-        # Clone section — shown when source_url is found
-        source_url = (store.get("result") or {}).get("source_url", "")
-        render_clone_section(source_url, store)
-
-        render_chat(st.session_state.paper_content)
 
 
 if __name__ == "__main__":
