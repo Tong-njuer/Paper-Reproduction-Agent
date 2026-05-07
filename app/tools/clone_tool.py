@@ -123,23 +123,54 @@ class CloneRepoTool(BaseTool):
             pass
 
     def _pull(self, target: Path, branch: str) -> ToolResult:
-        try:
-            result = subprocess.run(
-                ["git", "-C", str(target), "pull", "origin", branch],
-                capture_output=True, text=True, timeout=60,
-                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
-            )
-        except subprocess.TimeoutExpired:
-            return self._fail("拉取超时")
+        # Detect current branch before attempting pulls
+        current_branch = self._current_branch(target) or branch
 
-        if result.returncode != 0:
-            return self._fail(f"拉取失败: {result.stderr.strip()}")
+        # Build ordered list of branches to try
+        branches_to_try = []
+        for b in [branch, current_branch] + self.FALLBACK_BRANCHES:
+            if b and b not in branches_to_try:
+                branches_to_try.append(b)
 
+        last_error = None
+        for br in branches_to_try:
+            try:
+                result = subprocess.run(
+                    ["git", "-C", str(target), "pull", "origin", br],
+                    capture_output=True, text=True, timeout=60,
+                    env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+                )
+            except subprocess.TimeoutExpired:
+                return self._fail("拉取超时")
+
+            if result.returncode == 0:
+                return self._ok(
+                    output=f"仓库已存在，已拉取最新代码 ({br}): {target}",
+                    repo_name=target.name,
+                    local_path=str(target),
+                )
+            last_error = result.stderr.strip()
+
+        # Pull failed, but the repo is still available locally
+        self._log.warning(f"Pull failed for all branches, but repo exists: {last_error}")
         return self._ok(
-            output=f"仓库已存在，已拉取最新代码: {target}",
+            output=f"仓库已存在于本地: {target}\n(拉取更新失败，但之前克隆的代码可用)",
             repo_name=target.name,
             local_path=str(target),
         )
+
+    @staticmethod
+    def _current_branch(target: Path) -> str | None:
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(target), "branch", "--show-current"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0:
+                return r.stdout.strip()
+        except Exception:
+            pass
+        return None
 
     @staticmethod
     def _repo_name(url: str) -> str:

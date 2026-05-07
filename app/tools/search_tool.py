@@ -24,15 +24,29 @@ class SearchTool(BaseTool):
 
         self._log.info(f"Search: [{source}] {query[:80]}")
 
-        # Primary: LLM-based search (works everywhere, no API blocks)
-        if source == "llm":
+        # Always try arXiv first for academic papers — it is the most
+        # reliable source and doesn't hallucinate.  Fall back to LLM
+        # only if arXiv returns nothing.
+        if source in ("llm", "arxiv"):
+            try:
+                arxiv_result = self._search_arxiv(query)
+                if arxiv_result.success and arxiv_result.metadata.get("results"):
+                    self._enrich_with_llm(arxiv_result, query)
+                    return arxiv_result
+            except Exception as e:
+                self._log.warning(f"arXiv search failed: {e}, trying fallback")
+
+            # arXiv found nothing — fall back to LLM
+            if source == "arxiv":
+                return self._ok(
+                    output=f"arXiv 未找到 '{query}' 的相关论文。建议调整搜索词或使用 source=web。",
+                    results=[], source="arxiv",
+                )
             return self._search_via_llm(query)
 
-        # External API fallbacks
+        # Wikipedia / web — try directly, no arXiv fallback
         try:
-            if source == "arxiv":
-                return self._search_arxiv(query)
-            elif source == "wikipedia":
+            if source == "wikipedia":
                 return self._search_wikipedia(query)
             elif source == "web":
                 return self._search_web(query)
@@ -41,6 +55,33 @@ class SearchTool(BaseTool):
         except Exception as e:
             self._log.warning(f"External search failed: {e}, falling back to LLM")
             return self._search_via_llm(query)
+
+    def _enrich_with_llm(self, arxiv_result: ToolResult, query: str):
+        """Ask LLM to supplement arXiv results with source-code URLs."""
+        try:
+            results = arxiv_result.metadata.get("results", [])
+            paper_title = results[0].get("title", query) if results else query
+            resp = self._llm.generate_structured(
+                f"论文标题: {paper_title}\n"
+                f"用户搜索: {query}\n"
+                f"arXiv摘要: {arxiv_result.output[:500]}\n\n"
+                f"请提供该论文的官方源码仓库地址（GitHub等）。\n"
+                f"要求:\n"
+                f"1. 只返回你确认是该论文实现的仓库\n"
+                f"2. 如果论文没有公开官方代码，source_url 为空\n"
+                f"3. 社区实现或非官方仓库请在 note 中说明\n"
+                f'{{"source_url": "源码URL或空字符串", "note": "说明"}}'
+            )
+            source_url = resp.get("source_url", "")
+            if source_url:
+                # Append source URL to output and metadata
+                arxiv_result.output += f"\n源码: {source_url}\n"
+                for r in arxiv_result.metadata.get("results", []):
+                    r["source_url"] = source_url
+                    if source_url not in r.get("urls", []):
+                        r.setdefault("urls", []).append(source_url)
+        except Exception as e:
+            self._log.warning(f"LLM enrichment skipped: {e}")
 
     def _search_via_llm(self, query: str) -> ToolResult:
         """Use LLM to search for paper information. LLMs have vast training data."""

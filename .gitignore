@@ -51,6 +51,7 @@ Thumbs.db
 data/
 logs/
 *.log
+workspace/
 
 # Memory storage
 *.json

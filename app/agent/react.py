@@ -99,9 +99,16 @@ class ReActEngine:
 2. 搜索论文使用 source="llm"（默认），LLM知识库包含大量论文信息，最可靠
 3. 如果历史显示某个操作已失败多次，务必换用不同的工具或参数
 4. 获取论文内容使用 fetch_tool 直接访问已知URL，无需多次搜索
+5. 克隆仓库使用 clone_tool，repo_url 从历史记录中已找到的源码地址获取
 
 输出 JSON:
 {{"thought": "推理过程", "action": "工具名", "action_args": {{"参数": "值"}}}}"""
+
+    @staticmethod
+    def _first_url(text: str) -> str:
+        import re
+        urls = re.findall(r'https?://[^\s<>",{}|\\^`\[\]]+', text)
+        return urls[0] if urls else ""
 
     def _fallback_decide(self, step) -> ReActStep:
         if step.tool_hint:
@@ -123,4 +130,8 @@ class ReActEngine:
         elif "源码" in desc or "source" in desc or "仓库" in desc or "repo" in desc:
             return ReActStep(thought=f"查找源码", action="source_tool",
                              action_args={"paper_info": step.description})
+        elif "克隆" in desc or "clone" in desc:
+            repo_url = self._first_url(step.description)
+            return ReActStep(thought=f"克隆仓库", action="clone_tool",
+                             action_args={"repo_url": repo_url})
         return ReActStep(thought=f"执行: {step.description}", action="idle")

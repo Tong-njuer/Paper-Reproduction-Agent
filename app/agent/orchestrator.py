@@ -239,14 +239,19 @@ class Orchestrator:
         return result
 
     def _extract_result_info(self, result: AgentResult, step, observation: str):
-        sid = step.step_id
-        if sid in (3, 4) or "源码" in step.description or "source" in step.description.lower():
+        desc = step.description.lower()
+
+        # Source code — match by description keywords
+        if any(kw in desc for kw in ["源码", "source", "仓库", "repo", "github", "gitlab"]):
             urls = self._extract_urls(observation)
             for url in urls:
                 if self._is_repo_url(url) and not result.source_url:
                     result.source_url = url
                     self._emit_log("success", f"找到源码地址: {url}")
-        if sid in (1, 2) or "搜索" in step.description or "论文" in step.description or "获取" in step.description or "fetch" in step.description.lower():
+
+        # Paper content — match by description keywords
+        if any(kw in desc for kw in ["搜索", "论文", "获取", "阅读", "fetch",
+                                       "search", "paper", "arxiv", "访问"]):
             result.paper_content = (result.paper_content + "\n" + observation)[:15000]
             urls = self._extract_urls(observation)
             for url in urls:

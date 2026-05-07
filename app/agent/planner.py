@@ -77,19 +77,143 @@ REPRODUCTION_PLAN = [
              tool_hint=""),
 ]
 
+FULL_REPRODUCTION_PLAN = [
+    PlanStep(step_id=1, description="搜索论文，获取论文标题、作者、摘要和链接",
+             tool_hint="search_tool"),
+    PlanStep(step_id=2, description="获取并阅读论文全文内容，提取关键信息（方法、实验、代码链接）",
+             tool_hint="fetch_tool"),
+    PlanStep(step_id=3, description="从论文内容和引用中查找源码仓库地址",
+             tool_hint="source_tool"),
+    PlanStep(step_id=4, description="克隆源码仓库到本地工作区",
+             tool_hint="clone_tool"),
+    PlanStep(step_id=5, description="汇总报告：论文信息、源码地址与本地路径",
+             tool_hint=""),
+]
+
 
 class Planner:
     def __init__(self):
         self._llm = get_llm()
         self._log = get_logger("planner")
 
+    # ------------------------------------------------------------------
+    # Primary: LLM-driven planning
+    # ------------------------------------------------------------------
+
     def create_plan(self, goal: str, context: str = "") -> Plan:
         self._log.info(f"Creating plan for: {goal[:80]}")
-        if self._is_reproduction_goal(goal):
-            plan = self._create_reproduction_plan(goal)
-        else:
-            plan = self._create_generic_plan(goal, context)
-        return plan
+        try:
+            plan = self._llm_plan(goal, context)
+            if plan and plan.steps:
+                self._log.info(f"LLM plan: {len(plan.steps)} steps")
+                return plan
+        except Exception as e:
+            self._log.warning(f"LLM planning failed: {e}, using fallback")
+        return self._fallback_plan(goal)
+
+    def _llm_plan(self, goal: str, context: str) -> Plan:
+        tools_desc = "\n".join(
+            f"- {n}: {d}" for n, d in list_available_tools().items()
+        )
+        prompt = f"""你是任务规划器。分析用户意图，创建最精简的执行计划。
+
+用户目标: {goal}
+上下文: {context or "无"}
+
+可用工具:
+{tools_desc}
+
+根据用户意图选择计划模式:
+- 给仓库URL找对应论文 → 访问仓库页面→提取论文链接→搜索论文→报告
+- 给论文信息找源码 → 搜论文→读论文→找源码→报告
+- 复现论文(完整) → 搜论文→读论文→找源码→克隆→报告
+- 搜索/查询论文 → 搜论文→读论文→找源码→报告
+- 直接克隆仓库 → 克隆→报告
+- 简单问答 → 1步直接回答
+
+重要:
+- 每步都需要 tool_hint 指定工具名（search_tool/fetch_tool/source_tool/clone_tool）
+- 最后一步始终是汇总报告（tool_hint为空字符串）
+- 避免多余步骤，但至少要包含 执行步+报告步 两步
+- 如果目标中已有URL（github.com等），直接使用而不要重新搜索
+- 如果用户给仓库URL要查论文 → fetch_tool访问仓库页面→search_tool搜索论文→汇总报告
+
+输出 JSON:
+{{"steps": [{{"step_id": 1, "description": "...", "tool_hint": "search_tool"}}]}}"""
+        resp = self._llm.generate_structured(prompt)
+        steps = self._parse_steps(resp.get("steps", []))
+        return Plan(goal=goal, steps=steps) if steps else None
+
+    # ------------------------------------------------------------------
+    # Fallback: keyword-based (deterministic, no LLM call)
+    # ------------------------------------------------------------------
+
+    def _fallback_plan(self, goal: str) -> Plan:
+        lower = goal.lower()
+
+        # Repo URL + paper intent → fetch repo page first, then search paper
+        if self._has_repo_url(goal) and self._has_paper_intent(lower):
+            return self._create_repo_to_paper_plan(goal)
+
+        # Repo URL → direct clone
+        if self._has_repo_url(goal):
+            return Plan(goal=goal, steps=[
+                PlanStep(step_id=1, description="克隆源码仓库到本地工作区",
+                         tool_hint="clone_tool"),
+                PlanStep(step_id=2, description="验证克隆结果并报告本地路径",
+                         tool_hint=""),
+            ])
+
+        # Full reproduction
+        if any(kw in lower for kw in ["复现", "reproduce", "复刻"]):
+            return Plan(goal=goal, steps=[
+                PlanStep(step_id=s.step_id, description=s.description,
+                         tool_hint=s.tool_hint, expected_artifact=s.expected_artifact)
+                for s in FULL_REPRODUCTION_PLAN
+            ])
+
+        # Search / query
+        if any(kw in lower for kw in ["搜索", "search", "查询", "query",
+                                       "找", "论文", "paper", "克隆", "clone"]):
+            return Plan(goal=goal, steps=[
+                PlanStep(step_id=s.step_id, description=s.description,
+                         tool_hint=s.tool_hint, expected_artifact=s.expected_artifact)
+                for s in REPRODUCTION_PLAN
+            ])
+
+        # Generic
+        return Plan(goal=goal, steps=[
+            PlanStep(step_id=1, description=f"分析并执行: {goal[:80]}"),
+            PlanStep(step_id=2, description="汇总并报告结果"),
+        ])
+
+    def _has_repo_url(self, goal: str) -> bool:
+        import re
+        return bool(re.search(
+            r'https?://(github|gitlab|bitbucket|gitee|huggingface)\.com/[\w.-]+/[\w.-]+',
+            goal
+        ))
+
+    @staticmethod
+    def _has_paper_intent(lower: str) -> bool:
+        return any(kw in lower for kw in [
+            "论文", "paper", "原文", "文章", "arxiv", "文献", "doi",
+        ])
+
+    def _create_repo_to_paper_plan(self, goal: str) -> Plan:
+        """User gave a repo URL and wants to find the associated paper."""
+        return Plan(goal=goal, steps=[
+            PlanStep(step_id=1, description="访问仓库页面，从README/文档中提取论文链接",
+                     tool_hint="fetch_tool"),
+            PlanStep(step_id=2, description="根据提取的论文链接获取论文详细信息",
+                     tool_hint="search_tool"),
+            PlanStep(step_id=3, description="汇总报告：仓库信息与对应论文",
+                     tool_hint=""),
+        ])
+
+    # ------------------------------------------------------------------
+    # Replanning
+    # ------------------------------------------------------------------
 
     def replan(self, plan: Plan, failed_step: PlanStep, error: str) -> Plan:
         self._log.info(f"Replanning after step {failed_step.step_id} failed: {error[:80]}")
@@ -104,37 +228,6 @@ class Planner:
         except Exception as e:
             self._log.error(f"Replan failed: {e}, using fallback")
             return self._fallback_replan(plan, failed_step, error)
-
-    def _is_reproduction_goal(self, goal: str) -> bool:
-        keywords = ["复现", "reproduce", "reproduction", "论文", "paper"]
-        return any(kw in goal.lower() for kw in keywords)
-
-    def _create_reproduction_plan(self, goal: str) -> Plan:
-        return Plan(goal=goal, steps=[
-            PlanStep(step_id=s.step_id, description=s.description,
-                     tool_hint=s.tool_hint, expected_artifact=s.expected_artifact)
-            for s in REPRODUCTION_PLAN
-        ])
-
-    def _create_generic_plan(self, goal: str, context: str) -> Plan:
-        prompt = f"""你是任务规划器。请将以下目标分解为 3-5 个可执行步骤。
-
-目标: {goal}
-上下文: {context or "无"}
-
-输出 JSON:
-{{"steps": [{{"step_id": 1, "description": "...", "tool_hint": "..."}}]}}"""
-        try:
-            resp = self._llm.generate_structured(prompt)
-            steps = self._parse_steps(resp.get("steps", []))
-            return Plan(goal=goal, steps=steps)
-        except Exception as e:
-            self._log.error(f"LLM plan failed: {e}, using fallback")
-            return Plan(goal=goal, steps=[
-                PlanStep(step_id=1, description=f"分析目标: {goal}"),
-                PlanStep(step_id=2, description="搜索相关信息"),
-                PlanStep(step_id=3, description="执行并报告结果"),
-            ])
 
     def _build_replan_prompt(self, plan: Plan, failed: PlanStep, error: str) -> str:
         done = [s for s in plan.steps if s.status == "done"]

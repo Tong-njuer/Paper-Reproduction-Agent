@@ -1,0 +1,216 @@
+/* ──────────────────────────────────────────────────────────────
+   论文复现助手 — Custom Theme
+   Colour scheme: dark charcoal (#1A1A1D) + sweet pink (#E6397C)
+   Design: conversation-first, execution panel subdued
+   ────────────────────────────────────────────────────────────── */
+
+/* —— Root variables —— */
+:root {
+  --bg-dark: #1A1A1D;
+  --accent: #E6397C;
+  --accent-hover: #c72d65;
+  --surface: #252529;
+  --surface-hover: #2e2e33;
+  --border: #333338;
+  --text-primary: #E4E4E7;
+  --text-secondary: #a0a0a8;
+  --text-muted: #888892;
+  --success: #4ade80;
+  --warning: #facc15;
+  --error: #f87171;
+  --info: #60a5fa;
+}
+
+/* —— Global page background —— */
+body {
+  background: var(--bg-dark);
+  color: var(--text-primary);
+}
+
+/* —— Sidebar —— */
+#sidebar {
+  background: var(--bg-dark);
+  border-right: 1px solid var(--border);
+}
+
+/* —— Chat messages —— */
+.message {
+  background: transparent;
+}
+
+/* User message bubble */
+.message.user .message-content,
+.message[data-role="user"] .message-content {
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 12px 16px;
+  color: var(--text-primary);
+}
+
+/* Assistant message — clean, no bubble */
+.message.assistant .message-content,
+.message[data-role="assistant"] .message-content {
+  color: var(--text-primary);
+  padding: 8px 0;
+}
+
+/* —— Steps (Execution Panel) —— */
+.step {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin: 4px 0;
+  padding: 8px 12px;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  transition: background 0.15s ease;
+}
+
+.step:hover {
+  background: var(--surface-hover);
+}
+
+.step .step-header {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.step .step-name {
+  color: var(--text-secondary);
+}
+
+/* Step status — running */
+.step[data-status="running"] .step-name {
+  color: var(--text-primary);
+}
+
+/* Step status — done */
+.step[data-status="done"] .step-name {
+  color: var(--success);
+}
+
+/* Step status — error */
+.step[data-status="error"] .step-name {
+  color: var(--error);
+}
+
+/* —— Terminal / code blocks —— */
+code, pre {
+  background: #121215;
+  color: #c9d1d9;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 0.8rem;
+}
+
+pre {
+  padding: 12px;
+  overflow-x: auto;
+}
+
+code {
+  padding: 2px 6px;
+}
+
+/* —— Details/summary (terminal fold) —— */
+details {
+  margin-top: 8px;
+}
+
+details summary {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+details summary:hover {
+  color: var(--text-secondary);
+}
+
+/* —— Buttons —— */
+button, .button, a.button {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-weight: 500;
+  transition: background 0.15s ease;
+}
+
+button:hover, .button:hover {
+  background: var(--accent-hover);
+}
+
+/* —— Links —— */
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
+/* —— Input area —— */
+.chat-input, .chat-input input, .chat-input textarea {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--text-primary);
+}
+
+.chat-input:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(230, 57, 124, 0.2);
+}
+
+/* —— Scrollbar —— */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-dark);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* —— Selection —— */
+::selection {
+  background: rgba(230, 57, 124, 0.3);
+  color: var(--text-primary);
+}
+
+/* —— Settings panel —— */
+.settings-panel {
+  background: var(--bg-dark);
+}
+
+.settings-panel select,
+.settings-panel input {
+  background: var(--surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+/* —— Expander —— */
+.expander {
+  border-left: 2px solid var(--border);
+}
+
+.expander:hover {
+  border-left-color: var(--accent);
+}

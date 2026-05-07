@@ -8,7 +8,7 @@ services:
     container_name: repro_agent
     restart: unless-stopped
     ports:
-      - "8501:8501"
+      - "8000:8000"
     env_file:
       - .env
     environment:

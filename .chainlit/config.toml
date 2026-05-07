@@ -1,0 +1,15 @@
+[project]
+user_env = []
+session_timeout = 3600
+
+[UI]
+name = "论文复现助手"
+description = "AI Agent for paper reproduction — search, read, locate source code, and clone repositories."
+default_theme = "dark"
+layout = "wide"
+cot = "full"
+default_sidebar_state = "open"
+default_chat_settings_open = false
+
+[meta]
+generated_by = "1.0.0"

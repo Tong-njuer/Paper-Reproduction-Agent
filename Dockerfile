@@ -1,8 +1,8 @@
 FROM python:3.11-slim
 
 LABEL maintainer="SEIII Agent Team"
-LABEL description="Paper Reproduction Agent"
-LABEL version="2.0.0"
+LABEL description="Paper Reproduction Agent — Chainlit Frontend"
+LABEL version="2.1.0"
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
@@ -18,9 +18,12 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
 
 COPY app/ ./app/
+COPY .chainlit/ ./.chainlit/
+COPY public/ ./public/
+COPY chainlit.md ./
 
 RUN mkdir -p /app/logs /app/data/memory /app/workspace
 
-EXPOSE 8501
+EXPOSE 8000
 
-CMD ["streamlit", "run", "app/streamlit_app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+CMD ["chainlit", "run", "app/chainlit_app.py", "--host", "0.0.0.0", "--port", "8000"]
