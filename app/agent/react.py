@@ -1,336 +1,126 @@
-# ============================================================
-# ReAct 引擎模块
-# ============================================================
-# 实现 Thought -> Action -> Observation 循环。
-# 基于当前计划和上下文进行步级决策。
-#
-# 核心循环: Thought -> Action -> Observation -> Thought -> ...
-#
-# Console Output:
-#   - Current thought process
-#   - Action decisions
-#   - Observation results
-# ============================================================
+from typing import Any, Dict, Optional
 
-from typing import Dict, Any, Optional
-from pydantic import BaseModel, Field
 from app.core.llm import get_llm
-from app.core.context import ExecutionContext, StepContext
-from app.agent.planner import Plan, PlanStep
-from app.tools import get_tool, TOOL_REGISTRY
+from app.core.logging import get_logger
+from app.tools import get_tool, list_available_tools
 
 
-class ReActStep(BaseModel):
-    """
-    ReAct 循环中的单步。
+class ReActStep:
+    def __init__(self, thought: str, action: str, action_args: dict = None,
+                 observation: str = "", status: str = "pending"):
+        self.thought = thought
+        self.action = action
+        self.action_args = action_args or {}
+        self.observation = observation
+        self.status = status  # pending, success, failed
 
-    Attributes:
-        thought: 此步骤的 Agent 推理
-        action: 要执行的操作（工具名称）
-        action_args: 操作参数
-        observation: 操作结果
-        reasoning: 额外的推理链
-    """
-    thought: str
-    action: str
-    action_args: Dict[str, Any] = Field(default_factory=dict)
-    observation: str = ""
-    reasoning: str = ""
+    def to_dict(self) -> dict:
+        return {
+            "thought": self.thought, "action": self.action,
+            "action_args": self.action_args, "observation": self.observation,
+            "status": self.status,
+        }
 
 
 class ReActEngine:
-    """
-    ReAct（推理+行动）引擎。
-
-    实现核心决策循环:
-    1. 思考当前情况
-    2. 决定行动
-    3. 执行并观察
-    4. 从观察中学习
-
-    Attributes:
-        llm: 用于推理的 LLM 接口
-        max_retries: 失败行动的最大重试次数
-    """
-
     def __init__(self, max_retries: int = 3):
-        """
-        Initialize the ReAct Engine.
+        self._llm = get_llm()
+        self._max_retries = max_retries
+        self._log = get_logger("react")
 
-        Args:
-            max_retries: Maximum retry attempts for failed actions
-        """
-        self.llm = get_llm()
-        self.max_retries = max_retries
-        print("[RETRY] ReAct Engine initialized")
-
-    def decide_action(
-        self,
-        plan: Plan,
-        context: ExecutionContext,
-    ) -> ReActStep:
-        """
-        决定下一步要采取的行动。
-
-        Args:
-            plan: Current plan
-            context: Execution context
-
-        Returns:
-            ReActStep: The decided action with thought process
-        """
-        # Get current step from plan
-        current_step = plan.get_next_step()
-
-        if not current_step:
-            # No more steps - idle
+    def decide(self, goal: str, step: "PlanStep", history: str = "",
+               tools_desc: str = "") -> ReActStep:
+        prompt = self._build_decision_prompt(goal, step, history, tools_desc)
+        try:
+            resp = self._llm.generate_structured(prompt)
+            action = resp.get("action", "search_tool")
+            # Sanitize: reject invalid action names
+            valid_actions = set(list_available_tools().keys()) | {"idle", "finish", "report"}
+            if action not in valid_actions:
+                self._log.warning(f"Invalid action '{action}', falling back to search_tool")
+                action = "search_tool"
+            args = resp.get("action_args", {})
+            if not isinstance(args, dict):
+                args = {}
             return ReActStep(
-                thought="No more steps in plan",
-                action="idle",
-                action_args={},
+                thought=resp.get("thought", ""),
+                action=action,
+                action_args=args,
             )
+        except Exception as e:
+            self._log.error(f"Decision failed: {e}, using fallback")
+            return self._fallback_decide(step)
 
-        print(f"\n[BRAIN] ReAct: Deciding action for step {current_step.step_id}")
-        print(f"   Description: {current_step.description}")
+    def execute(self, react_step: ReActStep) -> str:
+        action = react_step.action
+        if action in ("idle", "finish", "report"):
+            return "Task step acknowledged"
 
-        # Build decision prompt
-        prompt = self._build_decision_prompt(current_step, plan, context)
-
-        if self.llm.is_available():
-            try:
-                response = self.llm.generate_structured(prompt)
-                react_step = self._parse_decision(response, current_step)
-            except Exception as e:
-                print(f"[!]  LLM decision failed: {e}")
-                react_step = self._create_fallback_decision(current_step)
-        else:
-            react_step = self._create_demo_decision(current_step)
-
-        # Print decision
-        print(f"\n[THINK] Thought: {react_step.thought}")
-        print(f"   Action: {react_step.action}")
-        if react_step.action_args:
-            print(f"   Args: {react_step.action_args}")
-
-        return react_step
-
-    def execute_action(self, react_step: ReActStep) -> str:
-        """
-        执行决定的行动。
-
-        Args:
-            react_step: The action to execute
-
-        Returns:
-            str: Observation (result) from execution
-        """
-        action_name = react_step.action
-
-        # Handle special actions
-        if action_name == "idle":
-            return "No action needed - plan complete"
-        elif action_name == "finish":
-            return "Task completed successfully"
-
-        # Get tool from registry
-        tool = get_tool(action_name)
-
+        tool = get_tool(action)
         if tool is None:
-            error_msg = f"Unknown action/tool: {action_name}"
-            print(f"[X] {error_msg}")
-            print(f"   Available tools: {list(TOOL_REGISTRY.keys())}")
-            return f"ERROR: {error_msg}"
+            available = ", ".join(list_available_tools().keys())
+            msg = f"Unknown tool: {action}. Available: {available}"
+            self._log.error(msg)
+            return f"ERROR: {msg}"
 
-        # Execute tool
-        print(f"\n[EXEC]  Executing: {action_name}")
-        print(f"   Args: {react_step.action_args}")
-
+        self._log.info(f"Execute: {action} args={react_step.action_args}")
         try:
             result = tool.execute(**react_step.action_args)
-
             if result.success:
-                print(f"[OK] Action completed")
-                print(f"   Output: {result.output[:200] if result.output else 'None'}...")
-                return result.output or "Action completed successfully"
+                react_step.status = "success"
+                react_step.observation = result.output or "Success"
+                return result.output or "Success"
             else:
-                print(f"[X] Action failed")
-                print(f"   Error: {result.error}")
+                react_step.status = "failed"
+                react_step.observation = result.error or "Unknown error"
                 return f"ERROR: {result.error}"
-
         except Exception as e:
-            error_msg = f"Action execution exception: {str(e)}"
-            print(f"[X] {error_msg}")
-            return f"ERROR: {error_msg}"
+            react_step.status = "failed"
+            react_step.observation = str(e)
+            self._log.error(f"Execution exception: {e}")
+            return f"ERROR: {e}"
 
-    def process_observation(
-        self,
-        observation: str,
-        context: ExecutionContext,
-    ) -> Dict[str, Any]:
-        """
-        处理行动的观察结果。
-
-        Args:
-            observation: The observation string
-            context: Current execution context
-
-        Returns:
-            Dict with analysis results:
-                - success: bool
-                - needs_reflexion: bool
-                - needs_replan: bool
-                - analysis: str
-        """
-        is_error = observation.startswith("ERROR")
-        is_success = "completed successfully" in observation.lower() or not is_error
-
-        print(f"\n[STAT] Observation Analysis:")
-        print(f"   Success: {is_success}")
-        print(f"   Error: {is_error}")
-
-        result = {
-            "success": is_success and not is_error,
-            "needs_reflexion": is_error,
-            "needs_replan": is_error,
-            "analysis": observation[:100],
-        }
-
-        return result
-
-    def _build_decision_prompt(
-        self,
-        current_step: PlanStep,
-        plan: Plan,
-        context: ExecutionContext,
-    ) -> str:
-        """
-        Build the prompt for action decision.
-
-        Args:
-            current_step: The step to decide action for
-            plan: Current plan
-            context: Execution context
-
-        Returns:
-            str: Formatted prompt
-        """
-        # Get recent history
-        recent_steps = context.steps[-3:] if context.steps else []
-        history_text = "\n".join(
-            f"- Step {s.step_id}: {s.action} -> {s.observation[:50]}"
-            for s in recent_steps
-        ) if recent_steps else "No previous steps"
-
-        # Available tools
-        available_tools = ", ".join(TOOL_REGISTRY.keys())
-        tool_guide = self._build_tool_usage_guide()
-
-        prompt = f"""You are a reasoning agent in a ReAct loop. Given the current situation, decide the next action.
-
-Current Plan Step:
-- Step ID: {current_step.step_id}
-- Description: {current_step.description}
-- Status: {current_step.status}
-
-Recent History:
-{history_text if history_text else "No history yet"}
-
-Available Tools:
-{available_tools}
-
-Tool Usage Guide (action-specific argument templates):
-{tool_guide}
-
-Your task is to decide WHAT action to take (not how to implement it).
-Choose the most appropriate tool and arguments to advance the plan.
-
-Hard constraints:
-1. "action" MUST be one of the available tools above.
-2. "action_args" MUST be a JSON object.
-3. If a tool needs an "action" field (e.g., paper_tool/source_tool/repo_index_tool/sandbox_tool/test_tool/doc_tool/schedule_tool), include it explicitly.
-4. Prefer minimal required args first, avoid fabricated paths.
-
-Output format (JSON):
-{{
-    "thought": "Explain your reasoning",
-    "action": "tool_name",
-    "action_args": {{"arg1": "value1", ...}}
-}}
-
-Choose action that will help complete the current step description."""
-        return prompt
-
-    def _build_tool_usage_guide(self) -> str:
-        """构建工具参数模板，帮助 LLM 输出稳定可执行的 action_args。"""
-        return """- paper_tool: {\"action\": \"extract\", \"text\": \"...\"} | {\"action\": \"extract_from_pdf\", \"pdf_path\": \"...\"}
-- source_tool: {\"action\": \"discover_candidates\", \"text\": \"...\"} | {\"action\": \"analyze_source\", \"source_path\": \"...\"}
-- repo_index_tool: {\"action\": \"summarize_repo\", \"root_path\": \"...\"} | {\"action\": \"search_text\", \"root_path\": \"...\", \"query\": \"...\"}
-- sandbox_tool: {\"action\": \"create_workspace\", \"user_id\": \"user_1\"} | {\"action\": \"detect_environment\", \"project_path\": \"...\"}
-- test_tool: {\"action\": \"run_unit_tests\", \"project_path\": \"...\"} | {\"action\": \"compare_metrics\", \"expected\": {...}, \"actual\": {...}}
-- doc_tool: {\"action\": \"generate_repro_report\", \"output_path\": \"...\", \"goal\": \"...\"}
-- schedule_tool: {\"action\": \"create_plan\", \"goal\": \"...\", \"tasks\": [\"...\"]}
-- code_tool: {\"command\": \"python --version\", \"timeout\": 30}
-- wiki_tool: {\"query\": \"transformer\", \"lang\": \"en\"}
-- learning_path_tool: {\"topic\": \"paper reproduction\", \"level\": \"beginner\", \"weeks\": 4}"""
-
-    def _parse_decision(
-        self,
-        response: Dict[str, Any],
-        current_step: PlanStep,
-    ) -> ReActStep:
-        """
-        Parse LLM decision response.
-
-        Args:
-            response: LLM JSON response
-            current_step: The current plan step
-
-        Returns:
-            ReActStep: Parsed decision
-        """
-        action = str(response.get("action", "idle"))
-        action_args = response.get("action_args", {})
-
-        if action not in TOOL_REGISTRY and action != "idle":
-            action = "idle"
-
-        if not isinstance(action_args, dict):
-            action_args = {}
-
-        return ReActStep(
-            thought=str(response.get("thought", "No thought provided")),
-            action=action,
-            action_args=action_args,
+    def _build_decision_prompt(self, goal: str, step, history: str, tools_desc: str) -> str:
+        tools_info = tools_desc or "\n".join(
+            f"- {name}: {desc}" for name, desc in list_available_tools().items()
         )
+        return f"""你是 ReAct 推理代理。根据当前目标和步骤，决定下一步操作。
 
-    def _create_fallback_decision(self, current_step: PlanStep) -> ReActStep:
-        """
-        Create fallback decision when LLM unavailable.
+目标: {goal}
+当前步骤: {step.description}
+可用工具 (只能选择以下工具之一):
+{tools_info}
 
-        Args:
-            current_step: Current plan step
+历史记录与经验:
+{history or "无"}
 
-        Returns:
-            ReActStep: Simple fallback decision
-        """
-        return ReActStep(
-            thought=f"Executing step: {current_step.description}",
-            action="code_tool",
-            action_args={"command": f"echo 'Executing: {current_step.description}'"},
-        )
+重要规则:
+1. action 必须是可用工具列表中的工具名，绝不能使用 "none" 或其他不存在的工具名
+2. 搜索论文使用 source="llm"（默认），LLM知识库包含大量论文信息，最可靠
+3. 如果历史显示某个操作已失败多次，务必换用不同的工具或参数
+4. 获取论文内容使用 fetch_tool 直接访问已知URL，无需多次搜索
 
-    def _create_demo_decision(self, current_step: PlanStep) -> ReActStep:
-        """
-        Create demo decision for demonstration mode.
+输出 JSON:
+{{"thought": "推理过程", "action": "工具名", "action_args": {{"参数": "值"}}}}"""
 
-        Args:
-            current_step: Current plan step
-
-        Returns:
-            ReActStep: Demo decision
-        """
-        return ReActStep(
-            thought=f"[DEMO] Would execute: {current_step.description}",
-            action="idle",
-            action_args={},
-        )
+    def _fallback_decide(self, step) -> ReActStep:
+        if step.tool_hint:
+            return ReActStep(
+                thought=f"使用 {step.tool_hint} 执行: {step.description}",
+                action=step.tool_hint,
+                action_args={"query": step.description} if "search" in step.tool_hint
+                else {"url": ""} if "fetch" in step.tool_hint
+                else {"paper_info": step.description} if "source" in step.tool_hint
+                else {},
+            )
+        desc = step.description.lower()
+        if "搜索" in desc or "search" in desc:
+            return ReActStep(thought=f"搜索: {step.description}", action="search_tool",
+                             action_args={"query": step.description})
+        elif "获取" in desc or "阅读" in desc or "fetch" in desc or "read" in desc:
+            return ReActStep(thought=f"获取内容", action="fetch_tool",
+                             action_args={"url": ""})
+        elif "源码" in desc or "source" in desc or "仓库" in desc or "repo" in desc:
+            return ReActStep(thought=f"查找源码", action="source_tool",
+                             action_args={"paper_info": step.description})
+        return ReActStep(thought=f"执行: {step.description}", action="idle")

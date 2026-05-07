@@ -1,0 +1,195 @@
+from typing import List, Optional
+
+from app.core.llm import get_llm
+from app.core.logging import get_logger
+
+
+class ErrorAnalysis:
+    def __init__(self, error_type: str = "unknown", explanation: str = "",
+                 severity: str = "medium"):
+        self.error_type = error_type
+        self.explanation = explanation
+        self.severity = severity  # low, medium, high
+
+    def to_dict(self) -> dict:
+        return {"error_type": self.error_type, "explanation": self.explanation,
+                "severity": self.severity}
+
+
+class FixSuggestion:
+    def __init__(self, action: str, args: dict = None, priority: int = 1,
+                 confidence: float = 0.5, description: str = ""):
+        self.action = action
+        self.args = args or {}
+        self.priority = priority
+        self.confidence = confidence
+        self.description = description
+
+    def to_dict(self) -> dict:
+        return {"action": self.action, "args": self.args, "priority": self.priority,
+                "confidence": self.confidence, "description": self.description}
+
+
+class ReflectionResult:
+    def __init__(self, level: str = "L1", analysis: ErrorAnalysis = None,
+                 fix_suggestions: List[FixSuggestion] = None,
+                 lesson: str = "", should_replan: bool = False):
+        self.level = level
+        self.analysis = analysis or ErrorAnalysis()
+        self.fix_suggestions = fix_suggestions or []
+        self.lesson = lesson
+        self.should_replan = should_replan
+
+    def to_dict(self) -> dict:
+        return {
+            "level": self.level,
+            "analysis": self.analysis.to_dict(),
+            "fix_suggestions": [f.to_dict() for f in self.fix_suggestions],
+            "lesson": self.lesson,
+            "should_replan": self.should_replan,
+        }
+
+
+class Reflection:
+    def __init__(self, enabled: bool = True):
+        self._enabled = enabled
+        self._llm = get_llm()
+        self._log = get_logger("reflection")
+
+    def reflect(self, error: str, step_desc: str = "",
+                history: str = "", level: str = "L2") -> ReflectionResult:
+        if not self._enabled:
+            return ReflectionResult(level=level)
+
+        self._log.info(f"Reflecting [{level}]: {error[:100]}")
+
+        # Pattern-based quick analysis
+        analysis = self._analyze_pattern(error)
+
+        # Generate fix suggestions
+        fixes = self._suggest_fixes(analysis, step_desc)
+
+        # L2+: use LLM for deeper analysis
+        if level in ("L2", "L3"):
+            try:
+                llm_result = self._llm_reflect(error, step_desc, history)
+                if llm_result:
+                    analysis = llm_result.analysis or analysis
+                    fixes = llm_result.fix_suggestions or fixes
+            except Exception as e:
+                self._log.warning(f"LLM reflection failed: {e}")
+
+        should_replan = (
+            analysis.severity == "high"
+            or analysis.error_type in ("not_found", "permanent_failure")
+            or len(fixes) == 0
+        )
+
+        lesson = self._derive_lesson(analysis, error)
+
+        return ReflectionResult(
+            level=level, analysis=analysis, fix_suggestions=fixes,
+            lesson=lesson, should_replan=should_replan,
+        )
+
+    def _analyze_pattern(self, error: str) -> ErrorAnalysis:
+        el = error.lower()
+        if any(kw in el for kw in ["not found", "404", "不存在", "找不到"]):
+            return ErrorAnalysis("not_found", "请求的资源或页面未找到", "high")
+        elif any(kw in el for kw in ["timeout", "超时", "timed out"]):
+            return ErrorAnalysis("timeout", "请求超时，可能是网络问题或目标服务器无响应", "medium")
+        elif any(kw in el for kw in ["permission", "denied", "拒绝", "403"]):
+            return ErrorAnalysis("permission", "访问被拒绝", "medium")
+        elif any(kw in el for kw in ["connection", "network", "网络", "refused"]):
+            return ErrorAnalysis("network", "网络连接失败", "medium")
+        elif any(kw in el for kw in ["parse", "json", "解析", "格式"]):
+            return ErrorAnalysis("parse_error", "数据解析失败，返回格式异常", "low")
+        elif any(kw in el for kw in ["empty", "null", "无结果", "none"]):
+            return ErrorAnalysis("empty_result", "查询返回了空结果", "medium")
+        elif any(kw in el for kw in ["unknown tool", "no tool"]):
+            return ErrorAnalysis("unknown_tool", "调用了不存在的工具", "high")
+        else:
+            return ErrorAnalysis("unknown", f"未分类错误: {error[:100]}", "medium")
+
+    def _suggest_fixes(self, analysis: ErrorAnalysis, step_desc: str) -> List[FixSuggestion]:
+        suggestions = {
+            "not_found": [
+                FixSuggestion("search_tool",
+                              {"query": step_desc, "source": "arxiv"},
+                              1, 0.8, "切换到 arXiv 学术搜索"),
+                FixSuggestion("search_tool",
+                              {"query": step_desc, "source": "web"},
+                              2, 0.6, "使用通用网页搜索重试"),
+                FixSuggestion("fetch_tool",
+                              {"url": ""}, 3, 0.3, "尝试直接访问已知论文网站"),
+            ],
+            "timeout": [
+                FixSuggestion("fetch_tool", {"url": "", "timeout": 60},
+                              1, 0.6, "增加超时时间重试"),
+                FixSuggestion("search_tool", {"source": "simple"},
+                              2, 0.5, "使用更简单的搜索方式"),
+            ],
+            "network": [
+                FixSuggestion("search_tool", {"source": "wikipedia"},
+                              1, 0.7, "尝试 Wikipedia 搜索"),
+                FixSuggestion("fetch_tool", {}, 2, 0.4, "等待片刻后重试"),
+            ],
+            "empty_result": [
+                FixSuggestion("search_tool",
+                              {"query": step_desc, "source": "web"},
+                              1, 0.7, "扩大搜索范围"),
+                FixSuggestion("search_tool",
+                              {}, 2, 0.4, "缩短搜索关键词重试"),
+            ],
+        }
+        return suggestions.get(analysis.error_type, [
+            FixSuggestion("search_tool",
+                          {"query": step_desc}, 1, 0.5, "重新搜索"),
+        ])
+
+    def _llm_reflect(self, error: str, step_desc: str, history: str) -> Optional[ReflectionResult]:
+        prompt = f"""分析以下执行错误并提供修复方案。
+
+步骤: {step_desc}
+错误: {error}
+历史: {history or "无"}
+
+输出 JSON:
+{{
+    "error_type": "错误类别",
+    "explanation": "通俗解释",
+    "severity": "low/medium/high",
+    "fix_suggestions": [{{"action": "工具名", "args": {{}}, "priority": 1, "confidence": 0.8, "description": "方案描述"}}],
+    "lesson": "经验教训"
+}}"""
+        resp = self._llm.generate_structured(prompt)
+        analysis = ErrorAnalysis(
+            error_type=resp.get("error_type", "unknown"),
+            explanation=resp.get("explanation", ""),
+            severity=resp.get("severity", "medium"),
+        )
+        fixes = [
+            FixSuggestion(
+                action=f.get("action", ""),
+                args=f.get("args", {}),
+                priority=f.get("priority", 1),
+                confidence=f.get("confidence", 0.5),
+                description=f.get("description", ""),
+            )
+            for f in resp.get("fix_suggestions", [])
+        ]
+        return ReflectionResult(
+            level="L2", analysis=analysis, fix_suggestions=fixes,
+            lesson=resp.get("lesson", ""),
+        )
+
+    def _derive_lesson(self, analysis: ErrorAnalysis, error: str) -> str:
+        lessons = {
+            "not_found": f"搜索 '{error[:50]}...' 未找到结果，下次可以尝试不同来源或更通用的搜索词",
+            "timeout": "网络请求超时，考虑增加超时时间或检查网络连接",
+            "network": "网络连接有问题，检查网络状态并使用备用数据源",
+            "empty_result": "查询返回空结果，尝试调整搜索关键词或范围",
+            "parse_error": "数据格式异常，需要更健壮的解析逻辑",
+            "unknown_tool": "工具调用错误，检查工具注册表",
+        }
+        return lessons.get(analysis.error_type, f"遇到错误: {analysis.explanation}，需进一步分析")

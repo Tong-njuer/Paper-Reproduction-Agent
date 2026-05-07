@@ -1,83 +1,34 @@
-# ============================================================
-# Docker Compose Configuration
-# ============================================================
-# Purpose: One-click deployment for the Agent Core
-# Platform: Windows 11 compatible
-
 version: '3.8'
 
-# ============================================================
-# Services Definition
-# ============================================================
 services:
-  # ----------------------------------------------------------
-  # Agent Core Service
-  # ----------------------------------------------------------
   agent:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: agent_core
-    # Restart policy for production reliability
+    container_name: repro_agent
     restart: unless-stopped
-    # Environment variables
-    environment:
-      # Anthropic API Configuration
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      # Agent Configuration
-      - AGENT_MAX_STEPS=${AGENT_MAX_STEPS:-50}
-      - AGENT_MODE=${AGENT_MODE:-demo}
-      # Logging Level
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-    # Volume mounts for persistent memory and logs
-    volumes:
-      - ./data/memory:/app/data/memory
-      - ./data/logs:/app/data/logs
-    # Standard I/O for container logs
-    stdin_open: true
-    tty: true
-    # Network configuration
-    networks:
-      - agent_network
-
-  # ----------------------------------------------------------
-  # Optional: Streamlit Web UI
-  # ----------------------------------------------------------
-  streamlit:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: agent_ui
-    # Only start if UI is needed
-    profiles:
-      - ui
-    restart: unless-stopped
-    command: streamlit run app/streamlit_app.py
     ports:
       - "8501:8501"
+    env_file:
+      - .env
     environment:
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - ZHIPU_API_KEY=${ZHIPU_API_KEY}
+      - LLM_PROVIDER=${LLM_PROVIDER:-zhipu}
+      - LLM_MODEL=${LLM_MODEL:-glm-4-plus}
+      - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-4096}
+      - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.7}
+      - AGENT_MAX_STEPS=${AGENT_MAX_STEPS:-10}
+      - AGENT_MAX_RETRIES=${AGENT_MAX_RETRIES:-3}
+      - AGENT_REPLAN_THRESHOLD=${AGENT_REPLAN_THRESHOLD:-3}
+      - AGENT_ENABLE_REFLECTION=${AGENT_ENABLE_REFLECTION:-true}
+      - AGENT_ENABLE_MEMORY=${AGENT_ENABLE_MEMORY:-true}
+      - WORKSPACE_DIR=${WORKSPACE_DIR:-./workspace}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_DIR=${LOG_DIR:-./logs}
+      - LOG_RETENTION=${LOG_RETENTION:-7 days}
     volumes:
+      - ./logs:/app/logs
       - ./data/memory:/app/data/memory
-      - ./data/logs:/app/data/logs
-    depends_on:
-      - agent
-    networks:
-      - agent_network
-
-# ============================================================
-# Networks
-# ============================================================
-networks:
-  agent_network:
-    driver: bridge
-    name: agent_core_network
-
-# ============================================================
-# Volumes (Persistent Data)
-# ============================================================
-volumes:
-  memory_data:
-    name: agent_memory
-  logs_data:
-    name: agent_logs
+      - ./workspace:/app/workspace
+    stdin_open: true
+    tty: true
