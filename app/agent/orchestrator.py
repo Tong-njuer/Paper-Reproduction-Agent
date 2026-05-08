@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from app.core.config import get_config
@@ -6,10 +7,10 @@ from app.core.llm import get_llm
 from app.core.logging import get_logger
 from app.agent.state import AgentState, StateManager
 from app.agent.memory import Memory, StepRecord
-from app.agent.planner import Planner, Plan
+from app.agent.planner import Planner, Plan, PlanStep
 from app.agent.react import ReActEngine, ReActStep
 from app.agent.reflection import Reflection, ReflectionResult
-from app.tools import list_available_tools
+from app.tools import list_available_tools, get_tool
 
 
 class AgentResult:
@@ -51,6 +52,7 @@ class Orchestrator:
         self._replan_threshold = agent_cfg.replan_threshold
         self._on_step = on_step
         self._on_log = on_log
+        self._step_context: Dict[str, str] = {}  # deterministic inter-step data
 
     def _emit_step(self, step_data: dict):
         if self._on_step:
@@ -86,28 +88,42 @@ class Orchestrator:
 
         consecutive_failures = 0
 
-        # Phase 2: Execute loop
+        # Phase 2: Execute loop with in-place retry
         while not self._state.should_terminate():
-            current = plan.get_next_step()
+            current = plan.get_next_step(allow_retry=True)
             if current is None:
                 self._log.info("All steps complete")
                 break
 
+            is_retry = current.retry_count > 0
             self._state.transition_to(AgentState.EXECUTING, f"Step {current.step_id}")
             self._state.step()
             current.status = "active"
 
+            retry_tag = f" [重试 #{current.retry_count}]" if is_retry else ""
             self._emit_step({
                 "type": "step_start", "step_id": current.step_id,
                 "description": current.description,
+                "retry": is_retry, "retry_count": current.retry_count,
             })
+            self._emit_log("info",
+                           f"步骤{current.step_id}{retry_tag}: {current.description}")
+
+            # --- Summary/report step: skip ReAct, call ReportTool directly ---
+            if self._is_summary_step(current):
+                self._handle_summary_step(current, result, plan)
+                break
 
             # ReAct: decide -> execute
             history = self._memory.context_for_prompt()
             tools_desc = "\n".join(
                 f"- {n}: {d}" for n, d in list_available_tools().items()
             )
-            react_step = self._react.decide(goal, current, history, tools_desc)
+            # Always force the planned tool — LLM only determines args
+            react_step = self._react.decide(
+                goal, current, history, tools_desc,
+                force_tool=current.tool_hint,
+            )
 
             # Record step
             record = StepRecord(
@@ -126,10 +142,11 @@ class Orchestrator:
                 "action": react_step.action,
                 "action_args": react_step.action_args,
             })
+            # Enrich args with deterministic inter-step data
+            self._enrich_args(react_step)
+
             self._emit_log("info",
-                           f"步骤{current.step_id} | 思考: {react_step.thought[:80]}")
-            self._emit_log("info",
-                           f"步骤{current.step_id} | 行动: {react_step.action}({react_step.action_args})")
+                           f"步骤{current.step_id}{retry_tag} | 行动: {react_step.action}({react_step.action_args})")
 
             # Execute action
             observation = self._react.execute(react_step)
@@ -141,84 +158,133 @@ class Orchestrator:
             })
 
             if react_step.status == "success":
+                # VERIFY step completion before marking done
+                verified, verify_msg = self._verify_step_completion(
+                    current, observation
+                )
+                if verified:
+                    consecutive_failures = 0
+                    self._state.reset_retry()
+                    plan.mark_done(current.step_id, observation)
+                    self._memory.update_last(status="done", observation=observation)
+                    result.steps.append({
+                        "step_id": current.step_id,
+                        "description": current.description,
+                        "thought": react_step.thought,
+                        "action": react_step.action,
+                        "observation": observation[:500],
+                        "status": "success",
+                        "retry_count": current.retry_count,
+                    })
+                    self._emit_log("success",
+                                   f"步骤{current.step_id} 完成: {observation[:100]}")
+                    self._extract_result_info(result, current, observation)
+                    continue  # Move to next step
+
+                # Tool succeeded but goal not achieved
+                react_step.status = "failed"
+                observation = f"ERROR: 步骤验证失败 - {verify_msg}"
+                self._emit_log("warning",
+                               f"步骤{current.step_id} 验证失败: {verify_msg}")
+
+            # --- Step failed ---
+            consecutive_failures += 1
+            self._state.increment_retry()
+            plan.mark_failed(current.step_id, observation)  # increments retry_count
+
+            error_msg = observation.replace("ERROR: ", "")
+            self._memory.update_last(status="failed", error=error_msg)
+            result.errors.append(
+                f"Step {current.step_id} (尝试 {current.retry_count}/{current.max_retries}): {error_msg[:200]}"
+            )
+            self._emit_log("error",
+                           f"步骤{current.step_id} 失败 ({current.retry_count}/{current.max_retries}): {error_msg[:150]}")
+
+            # Phase 3a: Try ErrorHandlerTool BEFORE reflection (fast fix)
+            error_handled = self._try_error_handler(current, error_msg)
+
+            if error_handled:
+                # Error was fixed — skip reflection, retry step immediately
+                self._emit_log("info",
+                               f"步骤{current.step_id} 错误已被ErrorHandler修复，立即重试")
+                plan.retry_step(current.step_id)
+                continue  # Back to loop, same step picked up as "pending"
+
+            # Phase 3b: Reflect (only if error handler didn't fix it)
+            self._state.transition_to(AgentState.REFLECTING,
+                                      f"Error in step {current.step_id}")
+            reflection_level = "L1" if current.retry_count == 1 else ("L2" if current.retry_count < current.max_retries else "L3")
+            reflection = self._reflection.reflect(
+                error=error_msg,
+                step_desc=current.description,
+                history=self._memory.context_for_prompt(),
+                level=reflection_level,
+            )
+
+            self._emit_step({
+                "type": "reflection", "step_id": current.step_id,
+                "analysis": reflection.analysis.to_dict(),
+                "fix_suggestions": [f.to_dict() for f in reflection.fix_suggestions],
+                "should_replan": reflection.should_replan,
+                "retry_count": current.retry_count,
+            })
+            self._emit_log("warning",
+                           f"反思 [{reflection.level}]: {reflection.analysis.explanation}")
+
+            # Record learning
+            self._memory.learn_from_error(
+                error_pattern=reflection.analysis.error_type,
+                fix_strategy="; ".join(
+                    f.description for f in reflection.fix_suggestions[:2]
+                ),
+            )
+
+            # Decide: in-place retry, replan, or skip
+            if current.retry_count < current.max_retries:
+                # In-place retry: apply fix suggestion and loop back
+                if reflection.fix_suggestions:
+                    fix = reflection.fix_suggestions[0]
+                    self._emit_log("info",
+                                   f"步骤{current.step_id} 应用修复 ({current.retry_count}/{current.max_retries}): {fix.description}")
+                    # Allow tool changes only for well-defined error→fix mappings
+                    if fix.action and fix.action in list_available_tools():
+                        if fix.action == current.tool_hint:
+                            current.tool_hint = fix.action
+                        elif self._allow_cross_tool_fix(
+                            reflection.analysis.error_type, current.tool_hint, fix.action
+                        ):
+                            self._emit_log("info",
+                                           f"允许跨工具修复: {current.tool_hint} → {fix.action} ({reflection.analysis.error_type})")
+                            current.tool_hint = fix.action
+                        else:
+                            self._emit_log("warning",
+                                           f"忽略跨工具修复建议: {fix.action} (当前工具: {current.tool_hint})")
+                    if fix.args:
+                        current.expected_artifact = fix.description
+                plan.retry_step(current.step_id)
+                # Loop continues — same step picked up as "pending" again
+            elif reflection.should_replan or consecutive_failures >= self._replan_threshold:
+                self._state.transition_to(AgentState.REPLANNING,
+                                          f"Replan after {consecutive_failures} failures")
+                self._emit_log("warning", "触发重新规划...")
+                plan = self._planner.replan(plan, current, error_msg)
                 consecutive_failures = 0
-                self._state.reset_retry()
-                plan.mark_done(current.step_id, observation)
-                self._memory.update_last(status="done", observation=observation)
+                self._emit_step({
+                    "type": "replan",
+                    "steps": [s.to_dict() for s in plan.steps],
+                })
+            else:
+                # Max retries exhausted, non-critical step → skip
+                plan.skip_step(current.step_id,
+                               f"已达最大重试次数 ({current.max_retries})")
+                self._emit_log("warning",
+                               f"步骤{current.step_id} 跳过（已达最大重试次数）")
                 result.steps.append({
                     "step_id": current.step_id,
                     "description": current.description,
-                    "thought": react_step.thought,
-                    "action": react_step.action,
-                    "observation": observation[:500],
-                    "status": "success",
+                    "status": "skipped",
+                    "reason": f"Max retries ({current.max_retries}) exhausted",
                 })
-                self._emit_log("success",
-                               f"步骤{current.step_id} 完成: {observation[:100]}")
-                self._extract_result_info(result, current, observation)
-
-            else:
-                consecutive_failures += 1
-                self._state.increment_retry()
-                error_msg = observation.replace("ERROR: ", "")
-                self._memory.update_last(status="failed", error=error_msg)
-                result.errors.append(f"Step {current.step_id}: {error_msg}")
-                self._emit_log("error",
-                               f"步骤{current.step_id} 失败: {error_msg[:150]}")
-
-                # Phase 3: Reflect
-                self._state.transition_to(AgentState.REFLECTING,
-                                          f"Error in step {current.step_id}")
-                reflection = self._reflection.reflect(
-                    error=error_msg,
-                    step_desc=current.description,
-                    history=self._memory.context_for_prompt(),
-                    level="L2" if consecutive_failures < 2 else "L3",
-                )
-
-                self._emit_step({
-                    "type": "reflection", "step_id": current.step_id,
-                    "analysis": reflection.analysis.to_dict(),
-                    "fix_suggestions": [f.to_dict() for f in reflection.fix_suggestions],
-                    "should_replan": reflection.should_replan,
-                })
-                self._emit_log("warning",
-                               f"反思 [{reflection.level}]: {reflection.analysis.explanation}")
-
-                # Record learning
-                self._memory.learn_from_error(
-                    error_pattern=reflection.analysis.error_type,
-                    fix_strategy="; ".join(
-                        f.description for f in reflection.fix_suggestions[:2]
-                    ),
-                )
-
-                # Decide: retry or replan
-                if reflection.should_replan or consecutive_failures >= self._replan_threshold:
-                    self._state.transition_to(AgentState.REPLANNING,
-                                              f"Replan after {consecutive_failures} failures")
-                    self._emit_log("warning", "触发重新规划...")
-                    plan = self._planner.replan(plan, current, error_msg)
-                    consecutive_failures = 0
-                    self._emit_step({
-                        "type": "replan",
-                        "steps": [s.to_dict() for s in plan.steps],
-                    })
-                else:
-                    # Retry: apply first fix suggestion
-                    if reflection.fix_suggestions:
-                        fix = reflection.fix_suggestions[0]
-                        self._emit_log("info",
-                                       f"重试步骤{current.step_id}: {fix.description}")
-                        plan.mark_failed(current.step_id, error_msg)
-                        new_step = type(current)(
-                            step_id=len(plan.steps) + 1,
-                            description=f"[重试] {current.description}",
-                            tool_hint=fix.action,
-                        )
-                        plan.steps.append(new_step)
-                    else:
-                        plan.mark_failed(current.step_id, error_msg)
 
         # Phase 4: Finalize
         if self._state.step_count >= self._state._max_steps:
@@ -253,7 +319,6 @@ class Orchestrator:
         # Setup / environment configuration — capture local path
         if any(kw in desc for kw in ["配置环境", "setup", "环境", "venv", "虚拟环境",
                                        "安装依赖", "配置依赖"]):
-            # Extract local path from setup result
             path_match = re.search(r'(?:路径|本地路径|local_path)[：:]\s*([^\s\n]+)', observation)
             if path_match:
                 local_path = path_match.group(1)
@@ -271,14 +336,362 @@ class Orchestrator:
                 if "arxiv" in url or "paper" in url.lower():
                     result.paper_info.setdefault("urls", []).append(url)
 
+        # plan_run_tool — capture the determined command for the next step (run_tool)
+        if step.tool_hint == "plan_run_tool":
+            cmd_match = re.search(r'命令[：:]\s*(.+?)(?:\n|$)', observation)
+            if cmd_match:
+                cmd = cmd_match.group(1).strip()
+                self._step_context["planned_command"] = cmd
+                self._emit_log("success", f"已捕获执行命令: {cmd[:120]}")
+
+        # Execution — capture repo analysis and results for post-execution Q&A
+        if any(kw in desc for kw in ["执行", "运行", "execute", "run",
+                                       "复现脚本", "复现执行",
+                                       "read_repo", "plan_run",
+                                       "规划.*命令", "确定.*命令"]):
+            result.paper_content = (result.paper_content + "\n" + observation)[:15000]
+            result.paper_info.setdefault("execution_results", []).append(
+                observation[:5000]
+            )
+            # Extract repo path from execution
+            path_match = re.search(r'路径[：:]\s*([^\s\n]+)', observation)
+            if path_match and not result.source_url:
+                result.source_url = path_match.group(1)
+
+    # ------------------------------------------------------------------
+    # Step completion verification
+    # ------------------------------------------------------------------
+
+    def _verify_step_completion(self, step: PlanStep, observation: str) -> tuple[bool, str]:
+        """Verify that a step actually achieved its goal, not just that the tool ran OK."""
+        tool = step.tool_hint
+
+        if tool == "clone_tool":
+            return self._verify_clone(step, observation)
+        elif tool == "setup_tool":
+            return self._verify_setup(step, observation)
+        elif tool == "search_tool":
+            return self._verify_search(step, observation)
+        elif tool == "fetch_tool":
+            return self._verify_fetch(step, observation)
+        elif tool == "source_tool":
+            return self._verify_source(step, observation)
+        elif tool == "execute_tool":
+            return self._verify_execute(step, observation)
+        elif tool == "read_repo_tool":
+            return self._verify_read_repo(step, observation)
+        elif tool == "plan_run_tool":
+            return self._verify_plan_run(step, observation)
+        elif tool == "run_tool":
+            return self._verify_run(step, observation)
+        else:
+            # Unknown tool — check observation is non-empty and not an error
+            if not observation or observation.strip() == "":
+                return False, "工具输出为空"
+            if observation.startswith("ERROR:"):
+                return False, observation
+            return True, ""
+
+    def _verify_clone(self, step: PlanStep, observation: str) -> tuple[bool, str]:
+        """Verify clone: target repo directory must exist in workspace."""
+        if observation.startswith("ERROR:"):
+            return False, observation
+
+        # Extract local path from observation
+        path_match = re.search(r'本地路径[：:]\s*([^\s\n]+)', observation)
+        if path_match:
+            local_path = Path(path_match.group(1))
+            if local_path.exists() and (local_path / ".git").exists():
+                return True, ""
+            return False, f"克隆目录不存在或无.git: {local_path}"
+
+        # Fallback: check workspace for recently created repos
+        ws = Path(get_config().agent.workspace_dir).resolve()
+        if ws.exists():
+            for d in sorted(ws.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+                if d.is_dir() and (d / ".git").exists():
+                    return True, ""
+        return False, "未找到克隆成功的仓库目录"
+
+    def _verify_setup(self, step: PlanStep, observation: str) -> tuple[bool, str]:
+        """Verify setup: venv directory must exist."""
+        if observation.startswith("ERROR:"):
+            return False, observation
+
+        # Check for venv path in output
+        path_match = re.search(r'(?:venv|虚拟环境).*?[：:]\s*([^\s\n]+)', observation)
+        if path_match:
+            venv_path = Path(path_match.group(1))
+        else:
+            # Try local_path from observation
+            path_match = re.search(r'路径[：:]\s*([^\s\n]+)', observation)
+            if path_match:
+                repo_path = Path(path_match.group(1))
+                venv_path = repo_path / ".venv"
+            else:
+                return False, "无法确定虚拟环境路径"
+
+        if venv_path.exists():
+            import sys
+            if sys.platform == "win32":
+                py = venv_path / "Scripts" / "python.exe"
+            else:
+                py = venv_path / "bin" / "python"
+            if py.exists():
+                return True, ""
+            return False, f"虚拟环境存在但Python解释器未找到: {py}"
+        return False, f"虚拟环境目录不存在: {venv_path}"
+
+    def _verify_search(self, step: PlanStep, observation: str) -> tuple[bool, str]:
+        """Verify search: output should contain paper info."""
+        if not observation or observation.strip() == "":
+            return False, "搜索返回空结果"
+        if observation.startswith("ERROR:"):
+            return False, observation
+        # Should contain some paper-like content
+        if any(kw in observation for kw in ["标题", "Title", "作者", "Author", "摘要", "Abstract", "年份", "Year"]):
+            return True, ""
+        # At minimum, non-empty output is acceptable for search
+        return True, ""
+
+    def _verify_fetch(self, step: PlanStep, observation: str) -> tuple[bool, str]:
+        """Verify fetch: output should be non-empty content."""
+        if not observation or observation.strip() == "":
+            return False, "获取内容为空"
+        if observation.startswith("ERROR:"):
+            return False, observation
+        return True, ""
+
+    def _verify_source(self, step: PlanStep, observation: str) -> tuple[bool, str]:
+        """Verify source: output should contain a repo URL."""
+        if not observation or observation.strip() == "":
+            return False, "源码搜索返回空结果"
+        if observation.startswith("ERROR:"):
+            return False, observation
+        urls = self._extract_urls(observation)
+        if any(self._is_repo_url(u) for u in urls):
+            return True, ""
+        if "github.com" in observation or "gitlab.com" in observation:
+            return True, ""
+        return False, "未在结果中找到有效的源码仓库链接"
+
+    def _verify_execute(self, step: PlanStep, observation: str) -> tuple[bool, str]:
+        """Verify execution: exit code should be 0, no fatal errors."""
+        if not observation or observation.strip() == "":
+            return False, "执行输出为空"
+        if observation.startswith("ERROR:"):
+            return False, observation
+        # Check exit code from output
+        if "退出码: 0" in observation or "exit_code" in observation.lower():
+            if "执行成功" in observation or "success" in observation.lower():
+                return True, ""
+        # Check for fatal error indicators
+        fatal_markers = ["Traceback (most recent call last)", "Error:", "FATAL"]
+        if any(m in observation for m in fatal_markers):
+            return False, "执行输出中包含错误"
+        # Non-empty output without fatal errors is acceptable
+        return True, ""
+
+    def _verify_read_repo(self, step: PlanStep, observation: str) -> tuple[bool, str]:
+        """Verify read_repo: output should contain repo analysis info."""
+        if not observation or observation.strip() == "":
+            return False, "仓库分析输出为空"
+        if observation.startswith("ERROR:"):
+            return False, observation
+        if any(kw in observation for kw in ["仓库分析完成", "README摘要", "框架:", "入口文件"]):
+            return True, ""
+        return True, ""  # Non-empty output is acceptable
+
+    def _verify_plan_run(self, step: PlanStep, observation: str) -> tuple[bool, str]:
+        """Verify plan_run: output should contain the determined command."""
+        if not observation or observation.strip() == "":
+            return False, "执行计划输出为空"
+        if observation.startswith("ERROR:"):
+            return False, observation
+        if any(kw in observation for kw in ["执行计划确定", "命令:", "命令来源"]):
+            return True, ""
+        return True, ""
+
+    def _verify_run(self, step: PlanStep, observation: str) -> tuple[bool, str]:
+        """Verify run: output should contain execution results."""
+        if not observation or observation.strip() == "":
+            return False, "执行输出为空"
+        if observation.startswith("ERROR:"):
+            return False, observation
+        fatal_markers = ["Traceback (most recent call last)", "Error:", "FATAL"]
+        if any(m in observation for m in fatal_markers):
+            return False, "执行输出中包含错误"
+        return True, ""
+
+    # ------------------------------------------------------------------
+    # Summary step handling (bypasses ReAct)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_summary_step(step: PlanStep) -> bool:
+        """A step is a summary step if it has no tool_hint or is explicitly a report step."""
+        if not step.tool_hint or step.tool_hint in ("", "report", "report_tool"):
+            return True
+        desc = step.description.lower()
+        summary_kw = ["汇总", "报告", "总结", "summary", "report", "验证克隆结果并报告"]
+        return any(kw in desc for kw in summary_kw)
+
+    def _handle_summary_step(self, step: PlanStep, result: AgentResult, plan: Plan):
+        """Generate final report using ReportTool, bypassing ReAct."""
+        self._emit_log("info", f"步骤{step.step_id}: 生成汇总报告")
+
+        report_tool = get_tool("report_tool")
+        if report_tool:
+            tool_result = report_tool.execute(
+                goal=result.goal,
+                steps=result.steps,
+                paper_info=result.paper_info,
+                source_url=result.source_url,
+                errors=result.errors,
+                paper_content=result.paper_content,
+            )
+            summary = tool_result.output if tool_result.success else self._build_summary(result, plan)
+        else:
+            summary = self._build_summary(result, plan)
+
+        plan.mark_done(step.step_id, summary)
+        result.summary = summary
+        result.steps.append({
+            "step_id": step.step_id,
+            "description": step.description,
+            "status": "success",
+            "observation": summary[:500],
+        })
+        self._emit_step({
+            "type": "summary", "step_id": step.step_id,
+            "summary": summary,
+        })
+        self._emit_log("success", f"报告生成完成")
+
+    # ------------------------------------------------------------------
+    # Error handler integration (before reflection)
+    # ------------------------------------------------------------------
+
+    def _try_error_handler(self, step: PlanStep, error_msg: str) -> bool:
+        """Try the ErrorHandlerTool to fix the error without replanning.
+        Returns True if the error was fixed and the step should be retried.
+        """
+        handler = get_tool("error_handler_tool")
+        if not handler:
+            return False
+
+        # Determine error type from reflection pattern analysis (lightweight)
+        error_type = self._reflection._analyze_pattern(error_msg).error_type
+
+        self._emit_log("info",
+                       f"步骤{step.step_id} 尝试ErrorHandler修复 [{error_type}]")
+
+        try:
+            result = handler.execute(
+                error=error_msg,
+                error_type=error_type,
+                step_description=step.description,
+            )
+            if result.success and result.metadata.get("fixed"):
+                self._emit_log("success",
+                               f"ErrorHandler修复成功: {result.output[:150]}")
+                # If error handler found a corrected command, apply it
+                corrected_cmd = result.metadata.get("corrected_command")
+                if corrected_cmd:
+                    self._emit_log("info",
+                                   f"ErrorHandler纠正命令: {corrected_cmd}")
+                return True
+            else:
+                self._emit_log("warning",
+                               f"ErrorHandler未能修复: {result.error[:150] if result.error else result.output[:150]}")
+                return False
+        except Exception as e:
+            self._log.warning(f"ErrorHandler failed: {e}")
+            return False
+
+    # ------------------------------------------------------------------
+    # Args enrichment — deterministic inter-step data passing
+    # ------------------------------------------------------------------
+
+    def _enrich_args(self, react_step: ReActStep):
+        """Inject deterministic args from previous step outputs.
+        This prevents the LLM from guessing or inventing parameters
+        that were already determined by a prior step.
+        """
+        tool = react_step.action
+
+        if tool == "run_tool":
+            planned_cmd = self._step_context.get("planned_command", "")
+            current_cmd = react_step.action_args.get("command", "")
+
+            # If no command, or it's a generic guess like "python main.py",
+            # override with the actual planned command from plan_run_tool
+            if planned_cmd and (not current_cmd or self._is_generic_command(current_cmd)):
+                self._log.info(f"Enriching run_tool command: {current_cmd!r} → {planned_cmd!r}")
+                react_step.action_args["command"] = planned_cmd
+
+        elif tool == "clone_tool":
+            stored_url = self._step_context.get("repo_url", "")
+            if stored_url and not react_step.action_args.get("repo_url"):
+                react_step.action_args["repo_url"] = stored_url
+
+    @staticmethod
+    def _is_generic_command(cmd: str) -> bool:
+        """Check if a command looks like a generic/default guess rather than a real one."""
+        # Commands that look like placeholders
+        generic_patterns = [
+            r'^python\s+main\.py\s*$',
+            r'^python\s+run\.py\s*$',
+            r'^python\s+train\.py\s*$',
+            r'^python\s+test\.py\s*$',
+            r'^python\s*$',
+            r'^python3\s+main\.py\s*$',
+            r'^python3\s+run\.py\s*$',
+        ]
+        import re as _re
+        cmd_stripped = cmd.strip()
+        for pat in generic_patterns:
+            if _re.match(pat, cmd_stripped):
+                return True
+        return False
+
+    # ------------------------------------------------------------------
+    # Cross-tool fix allowlist
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _allow_cross_tool_fix(error_type: str, current_tool: str, fix_tool: str) -> bool:
+        """Allow retry to switch tools only for well-defined error→fix mappings."""
+        allowed = {
+            # execute_tool / run_tool fails with missing deps → setup_tool
+            ("import_error", "execute_tool", "setup_tool"): True,
+            ("import_error", "run_tool", "setup_tool"): True,
+            ("pip_failed", "execute_tool", "setup_tool"): True,
+            ("pip_failed", "run_tool", "setup_tool"): True,
+            ("missing_requirements", "execute_tool", "setup_tool"): True,
+            ("missing_requirements", "run_tool", "setup_tool"): True,
+            # setup_tool fails on venv → run_tool may still work
+            ("venv_failed", "setup_tool", "execute_tool"): True,
+            ("venv_failed", "setup_tool", "run_tool"): True,
+            # clone failed → search may find alternative repo
+            ("not_found", "clone_tool", "search_tool"): True,
+            ("permission", "clone_tool", "search_tool"): True,
+            # plan_run_tool can't find entry → read_repo_tool re-analyze
+            ("no_entry_point", "plan_run_tool", "read_repo_tool"): True,
+            ("cmd_not_found", "plan_run_tool", "read_repo_tool"): True,
+        }
+        return allowed.get((error_type, current_tool, fix_tool), False)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
     @staticmethod
     def _extract_urls(text: str) -> List[str]:
-        import re
         return re.findall(r'https?://[^\s<>",{}|\\^`\[\]]+', text)
 
     @staticmethod
     def _is_repo_url(url: str) -> bool:
-        import re
         return bool(re.search(r'(github|gitlab|bitbucket|gitee|huggingface)\.com/', url, re.I))
 
     def _build_summary(self, result: AgentResult, plan: Plan) -> str:

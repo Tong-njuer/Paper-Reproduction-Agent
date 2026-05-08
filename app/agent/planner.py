@@ -11,11 +11,13 @@ class PlanStep:
                  expected_artifact: str = ""):
         self.step_id = step_id
         self.description = description
-        self.status = status  # pending, active, done, failed
+        self.status = status  # pending, active, done, failed, skipped
         self.depends_on = depends_on or []
         self.tool_hint = tool_hint
         self.expected_artifact = expected_artifact
         self.result: Optional[str] = None
+        self.retry_count: int = 0
+        self.max_retries: int = 3
 
     def to_dict(self) -> dict:
         return {
@@ -23,6 +25,7 @@ class PlanStep:
             "status": self.status, "depends_on": self.depends_on,
             "tool_hint": self.tool_hint, "expected_artifact": self.expected_artifact,
             "result": self.result,
+            "retry_count": self.retry_count,
         }
 
 
@@ -33,10 +36,16 @@ class Plan:
         self.current_idx = 0
         self.status = "active"  # active, completed, failed
 
-    def get_next_step(self) -> Optional[PlanStep]:
+    def get_next_step(self, allow_retry: bool = True) -> Optional[PlanStep]:
+        # First, return any pending step (including retried ones)
         for step in self.steps:
             if step.status == "pending":
                 return step
+        # If allowing retry, return a failed step that still has retries left
+        if allow_retry:
+            for step in self.steps:
+                if step.status == "failed" and step.retry_count < step.max_retries:
+                    return step
         return None
 
     def mark_done(self, step_id: int, result: str = ""):
@@ -44,6 +53,7 @@ class Plan:
             if s.step_id == step_id:
                 s.status = "done"
                 s.result = result
+                s.retry_count = 0
                 return
 
     def mark_failed(self, step_id: int, error: str = ""):
@@ -51,10 +61,31 @@ class Plan:
             if s.step_id == step_id:
                 s.status = "failed"
                 s.result = error
+                s.retry_count += 1
                 return
 
+    def retry_step(self, step_id: int):
+        """Reset a failed step back to pending for in-place retry (only if failed)."""
+        for s in self.steps:
+            if s.step_id == step_id and s.status == "failed" and s.retry_count < s.max_retries:
+                s.status = "pending"
+                return True
+        return False
+
+    def skip_step(self, step_id: int, reason: str = ""):
+        """Mark a step as skipped (max retries exhausted, non-critical)."""
+        for s in self.steps:
+            if s.step_id == step_id:
+                s.status = "skipped"
+                s.result = reason or "Max retries exhausted"
+                return
+
+    def has_step(self, tool_hint: str) -> bool:
+        """Check if any step has the given tool_hint."""
+        return any(s.tool_hint == tool_hint for s in self.steps)
+
     def is_complete(self) -> bool:
-        return all(s.status in ("done", "failed") for s in self.steps)
+        return all(s.status in ("done", "failed", "skipped") for s in self.steps)
 
     def completed_count(self) -> int:
         return sum(1 for s in self.steps if s.status == "done")
@@ -88,7 +119,13 @@ FULL_REPRODUCTION_PLAN = [
              tool_hint="clone_tool"),
     PlanStep(step_id=5, description="阅读仓库源码（README/requirements等）并配置Python虚拟环境，安装依赖",
              tool_hint="setup_tool"),
-    PlanStep(step_id=6, description="汇总报告：论文信息、源码地址、本地路径与环境配置结果",
+    PlanStep(step_id=6, description="阅读仓库README与入口文件，分析项目结构、框架与预期输出",
+             tool_hint="read_repo_tool"),
+    PlanStep(step_id=7, description="根据仓库分析结果，确定精确的执行命令（脚本路径+参数）",
+             tool_hint="plan_run_tool"),
+    PlanStep(step_id=8, description="在虚拟环境中执行复现命令，捕获stdout/stderr输出",
+             tool_hint="run_tool"),
+    PlanStep(step_id=9, description="汇总报告：论文信息、源码地址、本地路径、环境配置与执行结果",
              tool_hint=""),
 ]
 
@@ -96,6 +133,17 @@ SETUP_ONLY_PLAN = [
     PlanStep(step_id=1, description="阅读仓库源码（README、requirements等），确定复现目标，创建venv并安装依赖",
              tool_hint="setup_tool"),
     PlanStep(step_id=2, description="汇总报告：环境配置结果与复现目标",
+             tool_hint=""),
+]
+
+EXECUTE_ONLY_PLAN = [
+    PlanStep(step_id=1, description="阅读仓库README与入口文件，分析项目结构、框架与预期输出",
+             tool_hint="read_repo_tool"),
+    PlanStep(step_id=2, description="根据仓库分析结果，确定精确的执行命令（脚本路径+参数）",
+             tool_hint="plan_run_tool"),
+    PlanStep(step_id=3, description="在虚拟环境中执行复现命令，捕获stdout/stderr输出",
+             tool_hint="run_tool"),
+    PlanStep(step_id=4, description="汇总报告：执行结果与项目信息",
              tool_hint=""),
 ]
 
@@ -135,19 +183,22 @@ class Planner:
 根据用户意图选择计划模式:
 - 给仓库URL找对应论文 → 访问仓库页面→提取论文链接→搜索论文→报告
 - 给论文信息找源码 → 搜论文→读论文→找源码→报告
-- 复现论文(完整) → 搜论文→读论文→找源码→克隆→配置环境→报告
+- 复现论文(完整) → 搜论文→读论文→找源码→克隆→配置环境→阅读仓库→规划命令→执行→报告
 - 搜索/查询论文 → 搜论文→读论文→找源码→报告
 - 直接克隆仓库 → 克隆→报告
 - 配置环境（指定仓库或workspace中已有仓库）→ 阅读源码+创建venv+安装依赖→报告
+- 执行/运行（workspace中已有仓库且环境已配好）→ 阅读仓库→规划命令→执行→报告
 - 简单问答 → 1步直接回答
 
 重要:
-- 每步都需要 tool_hint 指定工具名（search_tool/fetch_tool/source_tool/clone_tool/setup_tool）
+- 每步都需要 tool_hint 指定工具名（search_tool/fetch_tool/source_tool/clone_tool/setup_tool/read_repo_tool/plan_run_tool/run_tool/execute_tool）
 - 最后一步始终是汇总报告（tool_hint为空字符串）
 - 避免多余步骤，但至少要包含 执行步+报告步 两步
 - 如果目标中已有URL（github.com等），直接使用而不要重新搜索
 - 如果用户给仓库URL要查论文 → fetch_tool访问仓库页面→search_tool搜索论文→汇总报告
 - 如果用户是"配置环境"且未指定仓库名，用setup_tool自动检测workspace中的仓库
+- 执行/运行类的目标应拆为三步: read_repo_tool(分析仓库) → plan_run_tool(确定命令) → run_tool(执行)
+- execute_tool 是旧版一体化执行工具，新计划请优先使用 read_repo_tool+plan_run_tool+run_tool
 
 输出 JSON:
 {{"steps": [{{"step_id": 1, "description": "...", "tool_hint": "search_tool"}}]}}"""
@@ -181,6 +232,14 @@ class Planner:
                 PlanStep(step_id=s.step_id, description=s.description,
                          tool_hint=s.tool_hint, expected_artifact=s.expected_artifact)
                 for s in SETUP_ONLY_PLAN
+            ])
+
+        # Execute / run (standalone — workspace already has repo + venv)
+        if self._has_execute_intent(lower):
+            return Plan(goal=goal, steps=[
+                PlanStep(step_id=s.step_id, description=s.description,
+                         tool_hint=s.tool_hint, expected_artifact=s.expected_artifact)
+                for s in EXECUTE_ONLY_PLAN
             ])
 
         # Full reproduction
@@ -231,6 +290,28 @@ class Planner:
         return False
 
     @staticmethod
+    def _has_execute_intent(lower: str) -> bool:
+        """Detect standalone execution intent (repo + venv already exist)."""
+        import re
+        exec_kw = [
+            "执行", "运行", "execute", "run script", "run the",
+            "复现执行", "跑一下", "跑一遍", "跑起来",
+            "exec ", "executing", "running",
+        ]
+        if any(kw in lower for kw in exec_kw):
+            return True
+        # Broader regex: run/running + target, exec + target, 执行/运行
+        if re.search(
+            r'\b(?:run(?:ning)?|exec(?:ute)?)\s+(?:the\s+)?'
+            r'(?:script|code|model|demo|train|eval|repo|project|复现)',
+            lower
+        ):
+            return True
+        if re.search(r'\b(?:运行|执行)(?:复现|脚本|模型)?', lower):
+            return True
+        return False
+
+    @staticmethod
     def _has_paper_intent(lower: str) -> bool:
         return any(kw in lower for kw in [
             "论文", "paper", "原文", "文章", "arxiv", "文献", "doi",
@@ -277,10 +358,18 @@ class Planner:
 
 请生成替代步骤，注意:
 1. 分析失败原因并调整策略
-2. 考虑备选方案（如更换搜索源、直接访问已知论文网站等）
-3. 保留已有的成功结果不重复
+2. 保留已有的成功结果不重复
+3. **工具选择必须匹配任务类型**:
+   - 缺少Python包/模块 → setup_tool (安装依赖)
+   - 需要分析仓库 → read_repo_tool
+   - 需要确定执行命令 → plan_run_tool
+   - 需要执行脚本 → run_tool
+   - 需要查找信息 → search_tool (仅用于学术论文搜索)
+   - 不要用 search_tool 搜索安装方法或验证文件
+4. **不要重复已完成的工作** (如已克隆的仓库不要再克隆)
+5. **最后一步必须是无 tool_hint 的汇总报告步骤**
 
-输出 JSON: {{"steps": [{{"step_id": 1, "description": "...", "tool_hint": "..."}}]}}"""
+输出 JSON: {{"steps": [{{"step_id": 1, "description": "...", "tool_hint": "setup_tool"}}]}}"""
 
     def _parse_steps(self, items: List[dict]) -> List[PlanStep]:
         steps = []
@@ -295,10 +384,13 @@ class Planner:
 
     def _fallback_replan(self, plan: Plan, failed: PlanStep, error: str) -> Plan:
         kept = [s for s in plan.steps if s.status == "done"]
+        next_id = len(kept) + 1
         new_steps = [
-            PlanStep(step_id=len(kept) + 1,
+            PlanStep(step_id=next_id,
                      description=f"重试: {failed.description}（使用备选方式）",
                      tool_hint=failed.tool_hint),
-            PlanStep(step_id=len(kept) + 2, description="汇总已有结果并报告"),
+            PlanStep(step_id=next_id + 1,
+                     description="汇总报告：当前所有步骤结果",
+                     tool_hint=""),
         ]
         return Plan(goal=plan.goal, steps=kept + new_steps)

@@ -49,12 +49,22 @@ def _build_registry():
     from app.tools.source_tool import SourceTool
     from app.tools.clone_tool import CloneRepoTool
     from app.tools.setup_tool import SetupTool
+    from app.tools.execute_tool import ExecuteTool
+    from app.tools.execution_steps import ReadRepoTool, PlanRunTool, RunTool
+    from app.tools.error_handler_tool import ErrorHandlerTool
+    from app.tools._interfaces import ReportTool
 
     register_tool(SearchTool())
     register_tool(FetchTool())
     register_tool(SourceTool())
     register_tool(CloneRepoTool())
     register_tool(SetupTool())
+    register_tool(ExecuteTool())
+    register_tool(ReadRepoTool())
+    register_tool(PlanRunTool())
+    register_tool(RunTool())
+    register_tool(ErrorHandlerTool())
+    register_tool(ReportTool())
 
 
 _build_registry()

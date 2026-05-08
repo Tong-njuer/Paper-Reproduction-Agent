@@ -94,7 +94,26 @@ class Reflection:
 
     def _analyze_pattern(self, error: str) -> ErrorAnalysis:
         el = error.lower()
-        if any(kw in el for kw in ["not found", "404", "不存在", "找不到"]):
+        # Specific patterns first (before generic ones like "not found")
+        # Execute-specific errors
+        if any(kw in el for kw in [
+            "未能从仓库中自动检测到可执行命令",
+            "no executable command",
+            "未检测到入口",
+        ]):
+            return ErrorAnalysis("no_entry_point",
+                                 "仓库中未找到可自动检测的入口文件（.py/.ipynb），需手动指定命令", "medium")
+        elif any(kw in el for kw in ["modulenotfound", "no module named",
+                                       "importerror", "导入失败"]):
+            return ErrorAnalysis("import_error", "Python 包导入/模块未找到，依赖可能未正确安装", "medium")
+        elif any(kw in el for kw in ["filenotfound", "no such file", "未找到文件"]):
+            return ErrorAnalysis("missing_file", "执行所需的文件或数据不存在", "medium")
+        elif any(kw in el for kw in ["cuda", "gpu", "out of memory", "oom"]):
+            return ErrorAnalysis("gpu_error", "GPU/CUDA相关错误，可能需切换CPU模式或检查显存", "medium")
+        elif any(kw in el for kw in ["命令未找到", "command not found", "not recognized"]):
+            return ErrorAnalysis("cmd_not_found", "执行命令未找到，入口脚本可能不存在", "high")
+        # Generic patterns
+        elif any(kw in el for kw in ["not found", "404", "不存在", "找不到"]):
             return ErrorAnalysis("not_found", "请求的资源或页面未找到", "high")
         elif any(kw in el for kw in ["timeout", "超时", "timed out"]):
             return ErrorAnalysis("timeout", "请求超时，可能是网络问题或目标服务器无响应", "medium")
@@ -115,9 +134,9 @@ class Reflection:
             return ErrorAnalysis("venv_failed", "虚拟环境创建或使用失败", "medium")
         elif any(kw in el for kw in ["requirements", "依赖文件", "未找到.*文件"]):
             return ErrorAnalysis("missing_requirements", "未找到依赖配置文件", "low")
-        elif any(kw in el for kw in ["import", "导入", "no module", "ModuleNotFound"]):
+        elif any(kw in el for kw in ["import", "导入", "no module"]):
             return ErrorAnalysis("import_error", "Python 包导入失败，依赖可能未正确安装", "medium")
-        elif any(kw in el for kw in ["no repo", "没有.*仓库", "多个仓库", "指定"]):
+        elif any(kw in el for kw in ["no repo", "没有.*仓库", "多个仓库"]):
             return ErrorAnalysis("ambiguous_repo", "仓库选择不明确，需要用户指定", "low")
         else:
             return ErrorAnalysis("unknown", f"未分类错误: {error[:100]}", "medium")
@@ -184,6 +203,33 @@ class Reflection:
                 FixSuggestion("setup_tool",
                               {"repo_name": ""}, 2, 0.7, "指定仓库名后重试"),
             ],
+            "no_entry_point": [
+                FixSuggestion("execute_tool",
+                              {"script": ""}, 1, 0.7,
+                              "查看仓库文件列表，指定正确的入口脚本名（如 denoising.ipynb）"),
+                FixSuggestion("execute_tool",
+                              {"command": ""}, 2, 0.5,
+                              "直接指定完整执行命令"),
+            ],
+            # Execute error fixes
+            "missing_file": [
+                FixSuggestion("execute_tool",
+                              {"command": ""}, 1, 0.5, "检查数据文件路径后重试"),
+                FixSuggestion("fetch_tool",
+                              {"url": ""}, 2, 0.3, "查看README了解数据准备步骤"),
+            ],
+            "gpu_error": [
+                FixSuggestion("execute_tool",
+                              {"command": ""}, 1, 0.6, "尝试添加 --device cpu 参数重试"),
+                FixSuggestion("execute_tool",
+                              {}, 2, 0.3, "检查CUDA/cuDNN安装或使用CPU"),
+            ],
+            "cmd_not_found": [
+                FixSuggestion("execute_tool",
+                              {"script": ""}, 1, 0.6, "重新分析仓库入口文件，指定正确的脚本名"),
+                FixSuggestion("setup_tool",
+                              {}, 2, 0.3, "仓库结构异常，可能需要先配置环境"),
+            ],
         }
         return suggestions.get(analysis.error_type, [
             FixSuggestion("search_tool",
@@ -238,6 +284,7 @@ class Reflection:
             "venv_failed": "虚拟环境创建失败，检查Python路径是否正确，或删除旧venv后重试",
             "missing_requirements": "未找到requirements.txt，尝试从setup.py/pyproject.toml安装或查看README手动说明",
             "import_error": "包导入失败，可能是版本不兼容或缺少系统依赖",
+            "no_entry_point": "该仓库可能使用Jupyter notebooks或非标准入口文件，需手动指定脚本名",
             "ambiguous_repo": "workspace中有多个仓库，需要明确指定要配置的仓库名",
         }
         return lessons.get(analysis.error_type, f"遇到错误: {analysis.explanation}，需进一步分析")
