@@ -108,6 +108,17 @@ class Reflection:
             return ErrorAnalysis("empty_result", "查询返回了空结果", "medium")
         elif any(kw in el for kw in ["unknown tool", "no tool"]):
             return ErrorAnalysis("unknown_tool", "调用了不存在的工具", "high")
+        # Setup/environment errors
+        elif any(kw in el for kw in ["pip", "安装失败", "install failed", "pip install"]):
+            return ErrorAnalysis("pip_failed", "pip 依赖安装失败", "medium")
+        elif any(kw in el for kw in ["venv", "虚拟环境", "virtual environment"]):
+            return ErrorAnalysis("venv_failed", "虚拟环境创建或使用失败", "medium")
+        elif any(kw in el for kw in ["requirements", "依赖文件", "未找到.*文件"]):
+            return ErrorAnalysis("missing_requirements", "未找到依赖配置文件", "low")
+        elif any(kw in el for kw in ["import", "导入", "no module", "ModuleNotFound"]):
+            return ErrorAnalysis("import_error", "Python 包导入失败，依赖可能未正确安装", "medium")
+        elif any(kw in el for kw in ["no repo", "没有.*仓库", "多个仓库", "指定"]):
+            return ErrorAnalysis("ambiguous_repo", "仓库选择不明确，需要用户指定", "low")
         else:
             return ErrorAnalysis("unknown", f"未分类错误: {error[:100]}", "medium")
 
@@ -140,6 +151,38 @@ class Reflection:
                               1, 0.7, "扩大搜索范围"),
                 FixSuggestion("search_tool",
                               {}, 2, 0.4, "缩短搜索关键词重试"),
+            ],
+            # Setup/environment fixes
+            "pip_failed": [
+                FixSuggestion("setup_tool",
+                              {"repo_name": "", "python": ""},
+                              1, 0.7, "重新尝试安装依赖"),
+                FixSuggestion("setup_tool",
+                              {}, 2, 0.4, "尝试逐个安装依赖包"),
+            ],
+            "venv_failed": [
+                FixSuggestion("setup_tool",
+                              {}, 1, 0.6, "删除旧venv后重新创建"),
+                FixSuggestion("setup_tool",
+                              {"python": ""}, 2, 0.4, "尝试使用其他Python解释器"),
+            ],
+            "missing_requirements": [
+                FixSuggestion("setup_tool",
+                              {}, 1, 0.6, "尝试从setup.py/pyproject.toml安装"),
+                FixSuggestion("fetch_tool",
+                              {"url": ""}, 2, 0.3, "检查仓库README中的手动安装说明"),
+            ],
+            "import_error": [
+                FixSuggestion("setup_tool",
+                              {}, 1, 0.6, "重新安装失败的依赖包"),
+                FixSuggestion("setup_tool",
+                              {"repo_name": ""}, 2, 0.4, "检查Python版本兼容性后重试"),
+            ],
+            "ambiguous_repo": [
+                FixSuggestion("clone_tool",
+                              {"repo_url": ""}, 1, 0.5, "先确认/克隆目标仓库"),
+                FixSuggestion("setup_tool",
+                              {"repo_name": ""}, 2, 0.7, "指定仓库名后重试"),
             ],
         }
         return suggestions.get(analysis.error_type, [
@@ -191,5 +234,10 @@ class Reflection:
             "empty_result": "查询返回空结果，尝试调整搜索关键词或范围",
             "parse_error": "数据格式异常，需要更健壮的解析逻辑",
             "unknown_tool": "工具调用错误，检查工具注册表",
+            "pip_failed": "pip安装失败，可能是网络问题或包不兼容，尝试单独安装或使用镜像源",
+            "venv_failed": "虚拟环境创建失败，检查Python路径是否正确，或删除旧venv后重试",
+            "missing_requirements": "未找到requirements.txt，尝试从setup.py/pyproject.toml安装或查看README手动说明",
+            "import_error": "包导入失败，可能是版本不兼容或缺少系统依赖",
+            "ambiguous_repo": "workspace中有多个仓库，需要明确指定要配置的仓库名",
         }
         return lessons.get(analysis.error_type, f"遇到错误: {analysis.explanation}，需进一步分析")

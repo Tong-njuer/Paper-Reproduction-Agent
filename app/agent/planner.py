@@ -86,7 +86,16 @@ FULL_REPRODUCTION_PLAN = [
              tool_hint="source_tool"),
     PlanStep(step_id=4, description="克隆源码仓库到本地工作区",
              tool_hint="clone_tool"),
-    PlanStep(step_id=5, description="汇总报告：论文信息、源码地址与本地路径",
+    PlanStep(step_id=5, description="阅读仓库源码（README/requirements等）并配置Python虚拟环境，安装依赖",
+             tool_hint="setup_tool"),
+    PlanStep(step_id=6, description="汇总报告：论文信息、源码地址、本地路径与环境配置结果",
+             tool_hint=""),
+]
+
+SETUP_ONLY_PLAN = [
+    PlanStep(step_id=1, description="阅读仓库源码（README、requirements等），确定复现目标，创建venv并安装依赖",
+             tool_hint="setup_tool"),
+    PlanStep(step_id=2, description="汇总报告：环境配置结果与复现目标",
              tool_hint=""),
 ]
 
@@ -126,17 +135,19 @@ class Planner:
 根据用户意图选择计划模式:
 - 给仓库URL找对应论文 → 访问仓库页面→提取论文链接→搜索论文→报告
 - 给论文信息找源码 → 搜论文→读论文→找源码→报告
-- 复现论文(完整) → 搜论文→读论文→找源码→克隆→报告
+- 复现论文(完整) → 搜论文→读论文→找源码→克隆→配置环境→报告
 - 搜索/查询论文 → 搜论文→读论文→找源码→报告
 - 直接克隆仓库 → 克隆→报告
+- 配置环境（指定仓库或workspace中已有仓库）→ 阅读源码+创建venv+安装依赖→报告
 - 简单问答 → 1步直接回答
 
 重要:
-- 每步都需要 tool_hint 指定工具名（search_tool/fetch_tool/source_tool/clone_tool）
+- 每步都需要 tool_hint 指定工具名（search_tool/fetch_tool/source_tool/clone_tool/setup_tool）
 - 最后一步始终是汇总报告（tool_hint为空字符串）
 - 避免多余步骤，但至少要包含 执行步+报告步 两步
 - 如果目标中已有URL（github.com等），直接使用而不要重新搜索
 - 如果用户给仓库URL要查论文 → fetch_tool访问仓库页面→search_tool搜索论文→汇总报告
+- 如果用户是"配置环境"且未指定仓库名，用setup_tool自动检测workspace中的仓库
 
 输出 JSON:
 {{"steps": [{{"step_id": 1, "description": "...", "tool_hint": "search_tool"}}]}}"""
@@ -162,6 +173,14 @@ class Planner:
                          tool_hint="clone_tool"),
                 PlanStep(step_id=2, description="验证克隆结果并报告本地路径",
                          tool_hint=""),
+            ])
+
+        # Setup / configure environment (standalone)
+        if self._has_setup_intent(lower):
+            return Plan(goal=goal, steps=[
+                PlanStep(step_id=s.step_id, description=s.description,
+                         tool_hint=s.tool_hint, expected_artifact=s.expected_artifact)
+                for s in SETUP_ONLY_PLAN
             ])
 
         # Full reproduction
@@ -193,6 +212,23 @@ class Planner:
             r'https?://(github|gitlab|bitbucket|gitee|huggingface)\.com/[\w.-]+/[\w.-]+',
             goal
         ))
+
+    @staticmethod
+    def _has_setup_intent(lower: str) -> bool:
+        # Direct keyword matches
+        if any(kw in lower for kw in [
+            "配置环境", "setup environment", "环境配置",
+            "安装依赖", "配置依赖", "setup env",
+        ]):
+            return True
+        # "配置" + "环境" appearing anywhere in the message
+        if "配置" in lower and "环境" in lower:
+            return True
+        # "setup" or "configure" + "env" in English
+        if any(kw in lower for kw in ["setup", "configure"]) and \
+           any(kw in lower for kw in ["env", "environment", "依赖", "环境"]):
+            return True
+        return False
 
     @staticmethod
     def _has_paper_intent(lower: str) -> bool:

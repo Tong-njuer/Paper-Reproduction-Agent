@@ -48,11 +48,13 @@ def _build_registry():
     from app.tools.fetch_tool import FetchTool
     from app.tools.source_tool import SourceTool
     from app.tools.clone_tool import CloneRepoTool
+    from app.tools.setup_tool import SetupTool
 
     register_tool(SearchTool())
     register_tool(FetchTool())
     register_tool(SourceTool())
     register_tool(CloneRepoTool())
+    register_tool(SetupTool())
 
 
 _build_registry()

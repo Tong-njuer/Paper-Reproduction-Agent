@@ -1,3 +1,4 @@
+import re
 from typing import Callable, Dict, List, Optional
 
 from app.core.config import get_config
@@ -248,6 +249,18 @@ class Orchestrator:
                 if self._is_repo_url(url) and not result.source_url:
                     result.source_url = url
                     self._emit_log("success", f"找到源码地址: {url}")
+
+        # Setup / environment configuration — capture local path
+        if any(kw in desc for kw in ["配置环境", "setup", "环境", "venv", "虚拟环境",
+                                       "安装依赖", "配置依赖"]):
+            # Extract local path from setup result
+            path_match = re.search(r'(?:路径|本地路径|local_path)[：:]\s*([^\s\n]+)', observation)
+            if path_match:
+                local_path = path_match.group(1)
+                if not result.source_url:
+                    result.source_url = local_path
+                result.paper_info.setdefault("local_paths", []).append(local_path)
+                self._emit_log("success", f"环境配置路径: {local_path}")
 
         # Paper content — match by description keywords
         if any(kw in desc for kw in ["搜索", "论文", "获取", "阅读", "fetch",

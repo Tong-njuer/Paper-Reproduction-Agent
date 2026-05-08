@@ -37,6 +37,7 @@ AGENT_KEYWORDS = [
     "克隆", "clone",
     "下载仓库", "下载代码",
     "跑一下", "运行实验", "执行", "run experiment",
+    "配置环境", "setup", "环境配置", "安装依赖", "配置依赖",
 ]
 
 _CLASSIFY_PROMPT = """判断用户意图：
@@ -87,6 +88,20 @@ def _enrich_goal(goal: str) -> str:
             f"{goal}\n\n"
             f"（上下文：上一次已经搜索过此论文，源码地址: {source_url}。"
             f"请基于已有信息继续，不要重复搜索。）"
+        )
+
+    # If the user asks to setup/configure environment without specifying a repo,
+    # hint with the last result's repo info
+    has_setup_intent = any(kw in goal.lower() for kw in [
+        "配置环境", "setup", "环境配置", "安装依赖", "配置依赖",
+    ])
+    if has_setup_intent and not has_url and source_url:
+        repo_name = source_url.rstrip("/").split("/")[-1]
+        if repo_name.endswith(".git"):
+            repo_name = repo_name[:-4]
+        return (
+            f"{goal}\n\n"
+            f"（上下文：上一次找到/克隆的仓库是 {repo_name}，源码地址: {source_url}）"
         )
 
     return goal
@@ -237,6 +252,7 @@ async def on_chat_start():
         "- 📄 **搜索并阅读论文** — 自动搜索 ArXiv 等来源\n"
         "- 🔍 **定位源码仓库** — 找到论文对应的官方实现\n"
         "- 📥 **克隆代码** — 自动克隆到本地工作区\n"
+        "- ⚙️ **配置环境** — 自动创建虚拟环境并安装依赖\n"
         "- 💬 **论文问答** — 基于论文内容解答你的问题\n\n"
         "直接告诉我你想复现的论文名称即可！"
     )).send()
