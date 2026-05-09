@@ -360,14 +360,16 @@ class Planner:
 1. 分析失败原因并调整策略
 2. 保留已有的成功结果不重复
 3. **工具选择必须匹配任务类型**:
+   - 需要克隆仓库 → clone_tool (repo_url 必须从历史记录中已找到的URL获取，绝不能编造)
    - 缺少Python包/模块 → setup_tool (安装依赖)
    - 需要分析仓库 → read_repo_tool
    - 需要确定执行命令 → plan_run_tool
    - 需要执行脚本 → run_tool
    - 需要查找信息 → search_tool (仅用于学术论文搜索)
    - 不要用 search_tool 搜索安装方法或验证文件
-4. **不要重复已完成的工作** (如已克隆的仓库不要再克隆)
-5. **最后一步必须是无 tool_hint 的汇总报告步骤**
+4. **失败的步骤必须重新尝试，不能跳过**: 如果 clone_tool 失败，替代方案中必须包含 clone_tool 重试（使用正确的URL），不能在仓库不存在的情况下跳到 setup_tool 或 run_tool
+5. **不要重复已成功的工作** — 已克隆成功的仓库不要再次克隆；未成功的则必须重试
+6. **最后一步必须是无 tool_hint 的汇总报告步骤**
 
 输出 JSON: {{"steps": [{{"step_id": 1, "description": "...", "tool_hint": "setup_tool"}}]}}"""
 

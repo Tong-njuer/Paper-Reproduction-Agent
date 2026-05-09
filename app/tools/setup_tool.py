@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -77,7 +78,7 @@ class SetupTool(BaseTool):
         repro_target = self._extract_repro_target(readme_content, hint_texts)
 
         # 4. Create virtual environment
-        python_exe = python or sys.executable
+        python_exe = python or self._resolve_python()
         venv_path = target / self.VENV_DIR
         venv_created = self._create_venv(target, venv_path, python_exe)
         if not venv_created:
@@ -306,6 +307,7 @@ class SetupTool(BaseTool):
     def _pip_install(self, python_venv: str, args: list[str],
                      results: dict) -> bool:
         cmd = [python_venv, "-m", "pip", "install"] + args
+        cmd_label = " ".join(args)[:120]
         try:
             r = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=600,
@@ -323,6 +325,21 @@ class SetupTool(BaseTool):
                     pkg_name = pkg.split()[0] if pkg else ""
                     if pkg_name and pkg_name not in results.get("installed", []):
                         results.setdefault("already_satisfied", []).append(pkg_name)
+
+            # Save pip output for user visibility
+            pip_outputs: list[dict] = results.setdefault("pip_outputs", [])
+            pip_outputs.append({
+                "label": cmd_label,
+                "ok": r.returncode == 0,
+                "stdout_tail": (
+                    r.stdout.strip().split("\n")[-20:]
+                    if r.stdout.strip() else []
+                ),
+                "stderr_tail": (
+                    r.stderr.strip().split("\n")[-10:]
+                    if r.stderr.strip() else []
+                ),
+            })
 
             if r.returncode != 0:
                 last_line = r.stderr.strip().split("\n")[-1] if r.stderr else "unknown error"
@@ -495,6 +512,19 @@ class SetupTool(BaseTool):
             for e in errors[:5]:
                 lines.append(f"  [WARN] {str(e)[:200]}")
 
+        # Show pip install console output
+        pip_outputs = install_results.get("pip_outputs", [])
+        if pip_outputs:
+            lines.append(f"")
+            lines.append(f"--- pip 安装输出 ({len(pip_outputs)} 步) ---")
+            for po in pip_outputs:
+                status = "[OK]" if po["ok"] else "[FAIL]"
+                lines.append(f"  {status} pip install {po['label']}")
+                for line in po["stdout_tail"]:
+                    lines.append(f"    | {line[:200]}")
+                for line in po["stderr_tail"]:
+                    lines.append(f"    | [stderr] {line[:200]}")
+
         lines.append(f"")
         lines.append(f"--- 验证结果 ---")
         vstatus = verify_results.get("status", "unknown")
@@ -517,6 +547,56 @@ class SetupTool(BaseTool):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_python() -> str:
+        """Resolve Python executable: config > python3.8 > python3 > python > sys.executable."""
+        cfg = get_config()
+        configured = cfg.agent.python_executable
+        if configured:
+            resolved = shutil.which(configured)
+            if resolved:
+                get_logger("setup_tool").info(f"Using configured Python: {resolved}")
+                return resolved
+
+        # Try python3.8 explicitly (common for TF 1.x compatibility)
+        # shutil.which may not find it in Docker, so also check known paths
+        candidates = [
+            "python3.7",
+            "/usr/bin/python3.7",
+            "/usr/local/bin/python3.7",
+            "python3.8",
+            "/usr/bin/python3.8",
+            "/usr/local/bin/python3.8",
+            "/opt/python3.8/bin/python3.8",
+            "python3.9",
+            "/usr/bin/python3.9",
+            "/usr/local/bin/python3.9",
+            "python3",
+            "python",
+        ]
+        for candidate in candidates:
+            resolved = shutil.which(candidate) if "/" not in candidate else candidate
+            if resolved and Path(resolved).exists():
+                # Verify it actually works
+                try:
+                    r = subprocess.run(
+                        [resolved, "--version"],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    if r.returncode == 0:
+                        version = r.stdout.strip() or r.stderr.strip()
+                        get_logger("setup_tool").info(
+                            f"Resolved Python: {resolved} ({version})"
+                        )
+                        return resolved
+                except Exception:
+                    continue
+
+        get_logger("setup_tool").warning(
+            f"No suitable Python found, falling back to {sys.executable}"
+        )
+        return sys.executable
 
     def _list_workspace_repos(self) -> list[Path]:
         """List directories in workspace that look like repos (have .git)."""
@@ -546,7 +626,6 @@ class SetupTool(BaseTool):
 
     @staticmethod
     def _rmdir(path: Path):
-        import shutil
         try:
             shutil.rmtree(str(path), ignore_errors=True)
         except Exception:

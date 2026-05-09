@@ -119,6 +119,12 @@ class Reflection:
             return ErrorAnalysis("timeout", "请求超时，可能是网络问题或目标服务器无响应", "medium")
         elif any(kw in el for kw in ["permission", "denied", "拒绝", "403"]):
             return ErrorAnalysis("permission", "访问被拒绝", "medium")
+        # Git auth errors — check before "connection" to avoid misclassification
+        elif any(kw in el for kw in [
+            "could not read username", "terminal prompts disabled",
+            "authentication failed", "fatal: could not read",
+        ]):
+            return ErrorAnalysis("auth_error", "Git 认证失败，需要设置 GITHUB_TOKEN 或确认仓库为公开", "high")
         elif any(kw in el for kw in ["connection", "network", "网络", "refused"]):
             return ErrorAnalysis("network", "网络连接失败", "medium")
         elif any(kw in el for kw in ["parse", "json", "解析", "格式"]):
@@ -175,9 +181,12 @@ class Reflection:
             "pip_failed": [
                 FixSuggestion("setup_tool",
                               {"repo_name": "", "python": ""},
-                              1, 0.7, "重新尝试安装依赖"),
+                              1, 0.8, "去掉版本号限制后重试安装（如 tensorflow==1.15.4 → tensorflow）"),
                 FixSuggestion("setup_tool",
-                              {}, 2, 0.4, "尝试逐个安装依赖包"),
+                              {}, 2, 0.5, "重新创建venv后逐个安装依赖包"),
+                FixSuggestion("setup_tool",
+                              {"python": "python3.8"}, 3, 0.4,
+                              "尝试使用 Python 3.8 创建虚拟环境（兼容旧版包）"),
             ],
             "venv_failed": [
                 FixSuggestion("setup_tool",
@@ -223,6 +232,14 @@ class Reflection:
                               {"command": ""}, 1, 0.6, "尝试添加 --device cpu 参数重试"),
                 FixSuggestion("execute_tool",
                               {}, 2, 0.3, "检查CUDA/cuDNN安装或使用CPU"),
+            ],
+            "auth_error": [
+                FixSuggestion("clone_tool",
+                              {"repo_url": ""}, 1, 0.8,
+                              "使用 GITHUB_TOKEN 环境变量重试克隆"),
+                FixSuggestion("clone_tool",
+                              {"repo_url": ""}, 2, 0.4,
+                              "确认仓库为公开仓库，或设置有效的 GitHub 凭据"),
             ],
             "cmd_not_found": [
                 FixSuggestion("execute_tool",
@@ -274,6 +291,7 @@ class Reflection:
 
     def _derive_lesson(self, analysis: ErrorAnalysis, error: str) -> str:
         lessons = {
+            "auth_error": "GitHub 认证失败，请确保设置了 GITHUB_TOKEN 环境变量，或使用公开仓库地址",
             "not_found": f"搜索 '{error[:50]}...' 未找到结果，下次可以尝试不同来源或更通用的搜索词",
             "timeout": "网络请求超时，考虑增加超时时间或检查网络连接",
             "network": "网络连接有问题，检查网络状态并使用备用数据源",

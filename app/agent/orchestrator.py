@@ -314,6 +314,7 @@ class Orchestrator:
             for url in urls:
                 if self._is_repo_url(url) and not result.source_url:
                     result.source_url = url
+                    self._step_context["repo_url"] = url
                     self._emit_log("success", f"找到源码地址: {url}")
 
         # Setup / environment configuration — capture local path
@@ -335,6 +336,9 @@ class Orchestrator:
             for url in urls:
                 if "arxiv" in url or "paper" in url.lower():
                     result.paper_info.setdefault("urls", []).append(url)
+                    # Forward to fetch_tool so it doesn't hallucinate URLs
+                    if not self._step_context.get("paper_url"):
+                        self._step_context["paper_url"] = url
 
         # plan_run_tool — capture the determined command for the next step (run_tool)
         if step.tool_hint == "plan_run_tool":
@@ -393,7 +397,7 @@ class Orchestrator:
             return True, ""
 
     def _verify_clone(self, step: PlanStep, observation: str) -> tuple[bool, str]:
-        """Verify clone: target repo directory must exist in workspace."""
+        """Verify clone: the specific target repo directory must exist in workspace."""
         if observation.startswith("ERROR:"):
             return False, observation
 
@@ -405,18 +409,70 @@ class Orchestrator:
                 return True, ""
             return False, f"克隆目录不存在或无.git: {local_path}"
 
-        # Fallback: check workspace for recently created repos
-        ws = Path(get_config().agent.workspace_dir).resolve()
-        if ws.exists():
+        # _pull existing-repo format: "仓库已存在于本地: /app/workspace/xxx"
+        existing_match = re.search(
+            r'仓库已存在于本地[：:]\s*([^\s\n]+)', observation
+        )
+        if existing_match:
+            local_path = Path(existing_match.group(1))
+            if local_path.exists() and (local_path / ".git").exists():
+                return True, ""
+            return False, f"本地仓库目录不存在: {local_path}"
+
+        # Extract repo URL from observation to derive expected directory name
+        url_match = re.search(r'仓库[：:]\s*(https?://[^\s\n]+)', observation)
+        if url_match:
+            repo_url = url_match.group(1)
+            repo_name = repo_url.rstrip("/").split("/")[-1]
+            if repo_name.endswith(".git"):
+                repo_name = repo_name[:-4]
+            expected_path = Path(get_config().agent.workspace_dir).resolve() / repo_name
+            if expected_path.exists() and (expected_path / ".git").exists():
+                return True, ""
+            return False, f"克隆后仓库目录未找到: {expected_path}"
+
+        # Last resort: observation says "克隆成功" — check workspace for the repo
+        # derived from step description or tool context
+        if "克隆成功" in observation or "拉取最新代码" in observation:
+            ws = Path(get_config().agent.workspace_dir).resolve()
+            # Try to find the repo from step description or any recent git dir
+            repo_name_match = re.search(
+                r'(?:仓库|repo|克隆)[^\n]*?[/\s]([a-zA-Z0-9_.-]+)(?:\s|$|\.git)',
+                observation
+            )
+            if repo_name_match:
+                expected = ws / repo_name_match.group(1).rstrip(".git")
+                if expected.exists() and (expected / ".git").exists():
+                    return True, ""
+            # Broad fallback: check any git repo modified in the last minute
+            import time
+            now = time.time()
             for d in sorted(ws.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
                 if d.is_dir() and (d / ".git").exists():
-                    return True, ""
-        return False, "未找到克隆成功的仓库目录"
+                    mtime = d.stat().st_mtime
+                    if now - mtime < 120:  # modified within 2 minutes
+                        return True, ""
+            return False, "输出显示克隆成功但无法在workspace中确认仓库"
+
+        return False, "无法从输出中确定克隆结果，缺少本地路径或仓库URL"
 
     def _verify_setup(self, step: PlanStep, observation: str) -> tuple[bool, str]:
-        """Verify setup: venv directory must exist."""
+        """Verify setup: venv must exist AND no critical pip install failures."""
         if observation.startswith("ERROR:"):
             return False, observation
+
+        # Check for pip install failures in the output
+        # setup_tool prints [WARN] for each failed package install
+        warn_matches = re.findall(r'\[WARN\]\s*(.+)', observation)
+        pip_errors = [m for m in warn_matches if any(
+            kw in m.lower() for kw in [
+                "no matching distribution", "could not find",
+                "could not install", "error:",
+            ]
+        )]
+        if pip_errors:
+            first_err = pip_errors[0][:150]
+            return False, f"依赖安装失败，{len(pip_errors)} 个包未能安装: {first_err}"
 
         # Check for venv path in output
         path_match = re.search(r'(?:venv|虚拟环境).*?[：:]\s*([^\s\n]+)', observation)
@@ -448,11 +504,21 @@ class Orchestrator:
             return False, "搜索返回空结果"
         if observation.startswith("ERROR:"):
             return False, observation
+        # Negative indicators — the search ran but found nothing
+        no_result_markers = [
+            "未找到", "not found", "no results", "0 results",
+            "无结果", "找不到", "no paper", "no match",
+            "could not find", "couldn't find",
+        ]
+        obs_lower = observation.lower()
+        for marker in no_result_markers:
+            if marker in obs_lower:
+                return False, f"搜索未找到相关论文 (检测到: {marker})"
         # Should contain some paper-like content
         if any(kw in observation for kw in ["标题", "Title", "作者", "Author", "摘要", "Abstract", "年份", "Year"]):
             return True, ""
-        # At minimum, non-empty output is acceptable for search
-        return True, ""
+        # Non-empty but without clear paper metadata — flag as uncertain
+        return False, "搜索结果中未检测到论文元数据（标题/作者/摘要等）"
 
     def _verify_fetch(self, step: PlanStep, observation: str) -> tuple[bool, str]:
         """Verify fetch: output should be non-empty content."""
@@ -632,8 +698,26 @@ class Orchestrator:
 
         elif tool == "clone_tool":
             stored_url = self._step_context.get("repo_url", "")
-            if stored_url and not react_step.action_args.get("repo_url"):
+            llm_url = react_step.action_args.get("repo_url", "")
+            # Always trust the stored URL from source_tool over the LLM's guess.
+            # The LLM routinely hallucinates repo URLs (e.g. inventing
+            # ningyuanshao/SimCLR when source_tool found google-research/simclr).
+            if stored_url and stored_url != llm_url:
+                self._log.info(
+                    f"Overriding hallucinated repo_url: {llm_url!r} → {stored_url!r}"
+                )
                 react_step.action_args["repo_url"] = stored_url
+
+        elif tool == "fetch_tool":
+            stored_url = self._step_context.get("paper_url", "")
+            llm_url = react_step.action_args.get("url", "")
+            # fetch_tool always needs a URL; LLM often passes empty string.
+            # Use the paper URL stored from a previous search_tool/fetch_tool step.
+            if stored_url and (not llm_url or llm_url != stored_url):
+                self._log.info(
+                    f"Enriching fetch_tool url: {llm_url!r} → {stored_url!r}"
+                )
+                react_step.action_args["url"] = stored_url
 
     @staticmethod
     def _is_generic_command(cmd: str) -> bool:

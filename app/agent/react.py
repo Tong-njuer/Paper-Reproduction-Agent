@@ -119,7 +119,7 @@ class ReActEngine:
 2. action_args 必须根据历史记录中的信息来填充:
    - run_tool 的 command 参数从上一步 plan_run_tool 的输出中提取完整命令
    - clone_tool 的 repo_url 从历史记录中已找到的源码地址获取
-   - search_tool 的 query 使用步骤描述中的查询词
+   - search_tool 的 query 使用步骤描述中的查询词；不要设置 source 参数（使用默认值 llm，会自动组合 arXiv+LLM 搜索）
    - fetch_tool 的 url 从历史记录中已找到的URL获取
    - setup_tool/read_repo_tool/plan_run_tool 通常不需要参数（自动检测仓库）
 3. 从历史记录中提取信息时，注意提取完整内容（如完整命令、完整URL）

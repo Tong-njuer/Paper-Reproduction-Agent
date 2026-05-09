@@ -36,11 +36,18 @@ class SearchTool(BaseTool):
             except Exception as e:
                 self._log.warning(f"arXiv search failed: {e}, trying fallback")
 
-            # arXiv found nothing — fall back to LLM
+            # arXiv found nothing — try LLM fallback before giving up
             if source == "arxiv":
-                return self._ok(
-                    output=f"arXiv 未找到 '{query}' 的相关论文。建议调整搜索词或使用 source=web。",
-                    results=[], source="arxiv",
+                self._log.info("arXiv found nothing, trying LLM fallback…")
+                try:
+                    llm_result = self._search_via_llm(query)
+                    if llm_result.success:
+                        return llm_result
+                except Exception:
+                    pass
+                return self._fail(
+                    f"arXiv 和 LLM 均未找到 '{query}' 的相关论文。"
+                    f"请尝试调整搜索词，或使用 source=web / source=wikipedia。"
                 )
             return self._search_via_llm(query)
 

@@ -132,6 +132,33 @@ class ErrorHandlerTool(BaseTool):
         self._log.info("Upgrading pip and retrying...")
         self._pip_install(venv_python, "pip", upgrade=True)
 
+        # -- "No matching distribution" → version probably incompatible --
+        no_dist_match = re.search(
+            r'No matching distribution found for\s+(\S+)',
+            error, re.I
+        )
+        if no_dist_match:
+            pkg_with_ver = no_dist_match.group(1)
+            # Strip version pin: "tensorflow==1.15.4" → "tensorflow"
+            pkg_name = re.split(r'[<>=!~]', pkg_with_ver)[0].strip()
+            self._log.info(
+                f"Version mismatch detected for {pkg_with_ver}, "
+                f"retrying without version pin: {pkg_name}"
+            )
+            ok, msg = self._pip_install(venv_python, pkg_name)
+            if ok:
+                return self._ok(
+                    output=f"已安装 {pkg_name}（去掉版本限制 {pkg_with_ver}）。"
+                           f"建议后续检查版本兼容性。",
+                    fixed=True,
+                    action=f"pip install {pkg_name}",
+                    detail=msg,
+                )
+            return self._fail(
+                f"无法安装 {pkg_name}（尝试去掉版本限制 {pkg_with_ver} 后仍失败）: {msg}",
+                fixed=False,
+            )
+
         # If there's a specific package mentioned, try individual install
         pkg_match = re.search(r'(?:install|uninstall)\s+(\S+)', error)
         if pkg_match:
@@ -260,6 +287,32 @@ class ErrorHandlerTool(BaseTool):
         except Exception as e:
             return self._fail(f"重新创建 venv 异常: {e}", fixed=False)
 
+    def _handle_auth_error(self, error: str, target: Path,
+                            venv_python: str, **kwargs) -> ToolResult:
+        """Retry git clone with GITHUB_TOKEN if available."""
+        token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        if not token:
+            return self._fail(
+                "未设置 GITHUB_TOKEN 环境变量，无法自动认证。"
+                "请在 .env 或环境中设置 GITHUB_TOKEN，或确认目标仓库为公开仓库。",
+                fixed=False,
+            )
+
+        # Extract repo URL from the error context
+        import re
+        url_match = re.search(r'https://github\.com/[\w.-]+/[\w.-]+(?:\.git)?', error)
+        if not url_match:
+            return self._fail("无法从错误信息中提取仓库 URL", fixed=False)
+
+        repo_url = url_match.group(0)
+        token_url = repo_url.replace("https://github.com/", f"https://{token}@github.com/")
+        return self._ok(
+            output=f"已使用 GITHUB_TOKEN 配置认证，重试克隆: {repo_url}",
+            fixed=True,
+            action="clone_tool",
+            args={"repo_url": token_url},
+        )
+
     def _handle_missing_requirements(self, error: str, target: Path,
                                      venv_python: Optional[str], **kwargs) -> ToolResult:
         """Try setup.py / pyproject.toml install."""
@@ -287,6 +340,11 @@ class ErrorHandlerTool(BaseTool):
 
         if any(kw in el for kw in ["modulenotfound", "no module named"]):
             return self._handle_import_error(error, target, venv_python)
+        elif any(kw in el for kw in [
+            "could not read username", "terminal prompts disabled",
+            "authentication failed", "fatal: could not read",
+        ]):
+            return self._handle_auth_error(error, target, venv_python)
         elif any(kw in el for kw in ["pip", "安装失败", "install failed"]):
             return self._handle_pip_failed(error, target, venv_python)
         elif any(kw in el for kw in ["命令未找到", "command not found"]):

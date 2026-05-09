@@ -23,6 +23,7 @@ class AgentConfig(BaseModel):
     enable_reflection: bool = True
     enable_memory: bool = True
     workspace_dir: str = Field(default="./workspace")
+    python_executable: str = Field(default="")
 
 
 class LogConfig(BaseModel):
@@ -65,6 +66,7 @@ class Config(BaseModel):
                 enable_memory=os.getenv("AGENT_ENABLE_MEMORY", "true").lower()
                 == "true",
                 workspace_dir=os.getenv("WORKSPACE_DIR", "./workspace"),
+                python_executable=os.getenv("PYTHON_EXECUTABLE", ""),
             ),
             log=LogConfig(
                 level=os.getenv("LOG_LEVEL", "INFO"),

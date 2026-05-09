@@ -21,6 +21,14 @@ class CloneRepoTool(BaseTool):
 
     FALLBACK_BRANCHES = ["main", "master"]
 
+    # GitHub auth error patterns
+    AUTH_ERROR_PATTERNS = [
+        "could not read Username",
+        "terminal prompts disabled",
+        "Authentication failed",
+        "fatal: could not read",
+    ]
+
     def execute(self, repo_url: str = "", branch: str = "", **kwargs) -> ToolResult:
         if not repo_url:
             return self._fail("repo_url 不能为空")
@@ -56,11 +64,44 @@ class CloneRepoTool(BaseTool):
             if target.exists():
                 self._rmdir(target)
 
+            # If this looks like an auth error, retry with GITHUB_TOKEN immediately
+            if self._is_auth_error(error) and "github.com" in repo_url.lower():
+                token_url = self._token_url(repo_url)
+                if token_url != repo_url:
+                    self._log.info(f"Auth error detected, retrying with GITHUB_TOKEN")
+                    result2, error2 = self._clone_attempt(token_url, br, target)
+                    if result2:
+                        self._log.info(f"Clone with token success: {target}")
+                        return self._build_ok(target, repo_url, br, repo_name)
+                    last_error = error2
+                    if target.exists():
+                        self._rmdir(target)
+
         self._log.error(f"All {len(branches_to_try)} branch attempts failed for {repo_url}")
+        if self._is_auth_error(last_error):
+            return self._fail(
+                f"GitHub 认证失败: {last_error}\n"
+                f"请在环境中设置 GITHUB_TOKEN 环境变量，或确认仓库为公开仓库。\n"
+                f"仓库: {repo_url}"
+            )
         return self._fail(
             f"克隆失败，尝试了 {len(branches_to_try)} 个分支 ({', '.join(branches_to_try)}) 均未成功。"
             f"最后错误: {last_error}"
         )
+
+    def _is_auth_error(self, error: str) -> bool:
+        if not error:
+            return False
+        el = error.lower()
+        return any(p.lower() in el for p in self.AUTH_ERROR_PATTERNS)
+
+    def _token_url(self, repo_url: str) -> str:
+        """Embed GITHUB_TOKEN or GH_TOKEN into the URL for authenticated cloning."""
+        token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        if not token or "github.com" not in repo_url:
+            return repo_url
+        # https://github.com/user/repo.git → https://<token>@github.com/user/repo.git
+        return repo_url.replace("https://github.com/", f"https://{token}@github.com/")
 
     def _clone_attempt(self, repo_url: str, branch: str, target: Path):
         try:
@@ -145,7 +186,11 @@ class CloneRepoTool(BaseTool):
 
             if result.returncode == 0:
                 return self._ok(
-                    output=f"仓库已存在，已拉取最新代码 ({br}): {target}",
+                    output=(
+                        f"克隆成功!\n"
+                        f"仓库已存在，已拉取最新代码 (分支: {br})\n"
+                        f"本地路径: {target}\n"
+                    ),
                     repo_name=target.name,
                     local_path=str(target),
                 )
@@ -154,7 +199,11 @@ class CloneRepoTool(BaseTool):
         # Pull failed, but the repo is still available locally
         self._log.warning(f"Pull failed for all branches, but repo exists: {last_error}")
         return self._ok(
-            output=f"仓库已存在于本地: {target}\n(拉取更新失败，但之前克隆的代码可用)",
+            output=(
+                f"仓库已存在于本地: {target}\n"
+                f"本地路径: {target}\n"
+                f"(拉取更新失败，但之前克隆的代码可用)"
+            ),
             repo_name=target.name,
             local_path=str(target),
         )
