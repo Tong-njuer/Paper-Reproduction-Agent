@@ -30,6 +30,9 @@ RUN python3.11 -m ensurepip --upgrade && \
 # Default to Python 3.7 for reproducing legacy papers (SimCLR, TensorFlow 1.x etc.)
 ENV PYTHON_EXECUTABLE=/usr/bin/python3.7
 
+# Pip mirror for faster downloads (override via PIP_INDEX_URL env var)
+ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+
 # Install Python dependencies (for the agent app, runs on Python 3.11)
 COPY requirements.txt .
 RUN python3.11 -m pip install --no-cache-dir -r requirements.txt \

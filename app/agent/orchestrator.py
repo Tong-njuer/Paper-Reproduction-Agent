@@ -53,6 +53,7 @@ class Orchestrator:
         self._on_step = on_step
         self._on_log = on_log
         self._step_context: Dict[str, str] = {}  # deterministic inter-step data
+        self._failed_urls: set = set()  # URLs that have been tried for clone and failed
 
     def _emit_step(self, step_data: dict):
         if self._on_step:
@@ -172,7 +173,7 @@ class Orchestrator:
                         "description": current.description,
                         "thought": react_step.thought,
                         "action": react_step.action,
-                        "observation": observation[:500],
+                        "observation": observation[:8000],
                         "status": "success",
                         "retry_count": current.retry_count,
                     })
@@ -199,6 +200,17 @@ class Orchestrator:
             )
             self._emit_log("error",
                            f"步骤{current.step_id} 失败 ({current.retry_count}/{current.max_retries}): {error_msg[:150]}")
+
+            # Track failed clone URLs so _enrich_args won't force them on retry
+            if current.tool_hint == "clone_tool":
+                failed_url = react_step.action_args.get("repo_url", "")
+                if failed_url:
+                    self._failed_urls.add(failed_url)
+                    # Clear the stored context URL so retry uses a fresh one
+                    if self._step_context.get("repo_url") == failed_url:
+                        self._step_context.pop("repo_url", None)
+                        self._emit_log("info",
+                                       f"Cleared failed repo_url from context: {failed_url}")
 
             # Phase 3a: Try ErrorHandlerTool BEFORE reflection (fast fix)
             error_handled = self._try_error_handler(current, error_msg)
@@ -308,8 +320,10 @@ class Orchestrator:
     def _extract_result_info(self, result: AgentResult, step, observation: str):
         desc = step.description.lower()
 
-        # Source code — match by description keywords
-        if any(kw in desc for kw in ["源码", "source", "仓库", "repo", "github", "gitlab"]):
+        # Source code — only extract repo URLs from source_tool (which is
+        # specifically designed to find official repos from paper references).
+        # search_tool returns arXiv results that may mention unrelated repos.
+        if step.tool_hint == "source_tool":
             urls = self._extract_urls(observation)
             for url in urls:
                 if self._is_repo_url(url) and not result.source_url:
@@ -326,6 +340,7 @@ class Orchestrator:
                 if not result.source_url:
                     result.source_url = local_path
                 result.paper_info.setdefault("local_paths", []).append(local_path)
+                self._step_context["planned_repo_path"] = local_path
                 self._emit_log("success", f"环境配置路径: {local_path}")
 
         # Paper content — match by description keywords
@@ -340,13 +355,17 @@ class Orchestrator:
                     if not self._step_context.get("paper_url"):
                         self._step_context["paper_url"] = url
 
-        # plan_run_tool — capture the determined command for the next step (run_tool)
+        # plan_run_tool — capture the determined command & path for run_tool
         if step.tool_hint == "plan_run_tool":
             cmd_match = re.search(r'命令[：:]\s*(.+?)(?:\n|$)', observation)
             if cmd_match:
                 cmd = cmd_match.group(1).strip()
                 self._step_context["planned_command"] = cmd
                 self._emit_log("success", f"已捕获执行命令: {cmd[:120]}")
+            path_match = re.search(r'路径[：:]\s*([^\s\n]+)', observation)
+            if path_match:
+                self._step_context["planned_repo_path"] = path_match.group(1)
+                self._emit_log("success", f"已捕获仓库路径: {path_match.group(1)}")
 
         # Execution — capture repo analysis and results for post-execution Q&A
         if any(kw in desc for kw in ["执行", "运行", "execute", "run",
@@ -355,7 +374,7 @@ class Orchestrator:
                                        "规划.*命令", "确定.*命令"]):
             result.paper_content = (result.paper_content + "\n" + observation)[:15000]
             result.paper_info.setdefault("execution_results", []).append(
-                observation[:5000]
+                observation[:8000]
             )
             # Extract repo path from execution
             path_match = re.search(r'路径[：:]\s*([^\s\n]+)', observation)
@@ -388,6 +407,8 @@ class Orchestrator:
             return self._verify_plan_run(step, observation)
         elif tool == "run_tool":
             return self._verify_run(step, observation)
+        elif tool == "execute_session_tool":
+            return self._verify_execute_session(step, observation)
         else:
             # Unknown tool — check observation is non-empty and not an error
             if not observation or observation.strip() == "":
@@ -589,6 +610,22 @@ class Orchestrator:
             return False, "执行输出中包含错误"
         return True, ""
 
+    def _verify_execute_session(self, step: PlanStep, observation: str) -> tuple[bool, str]:
+        """Verify execute_session_tool: check for success indicator or explicit failure."""
+        if not observation or observation.strip() == "":
+            return False, "执行会话输出为空"
+        if observation.startswith("ERROR:"):
+            return False, observation
+        # The tool prefixes output with [SUCCESS] or [FAILED]
+        if "[SUCCESS]" in observation:
+            return True, ""
+        if "[FAILED]" in observation:
+            # Still mark as "verified" (tool ran correctly) — the failure
+            # will be picked up by the normal error/reflection flow
+            return True, ""
+        # Non-empty output without clear indicators is acceptable
+        return True, ""
+
     # ------------------------------------------------------------------
     # Summary step handling (bypasses ReAct)
     # ------------------------------------------------------------------
@@ -689,24 +726,58 @@ class Orchestrator:
         if tool == "run_tool":
             planned_cmd = self._step_context.get("planned_command", "")
             current_cmd = react_step.action_args.get("command", "")
+            planned_path = self._step_context.get("planned_repo_path", "")
 
-            # If no command, or it's a generic guess like "python main.py",
-            # override with the actual planned command from plan_run_tool
-            if planned_cmd and (not current_cmd or self._is_generic_command(current_cmd)):
-                self._log.info(f"Enriching run_tool command: {current_cmd!r} → {planned_cmd!r}")
+            # Always trust plan_run_tool's result over LLM hallucination.
+            # The LLM should NOT invent commands when a plan already exists.
+            if planned_cmd and current_cmd != planned_cmd:
+                self._log.info(
+                    f"Overriding hallucinated run_tool command: "
+                    f"{current_cmd!r} → {planned_cmd!r}"
+                )
                 react_step.action_args["command"] = planned_cmd
+
+            # Inject repo_path from plan_run_tool to prevent repo name
+            # hallucination (e.g. "simclr" → "simclr_repo")
+            if planned_path:
+                llm_repo = react_step.action_args.get("repo_name", "")
+                if llm_repo and planned_path:
+                    planned_name = Path(planned_path).name
+                    if llm_repo != planned_name:
+                        self._log.info(
+                            f"Overriding hallucinated repo_name: "
+                            f"{llm_repo!r} → {planned_name!r}"
+                        )
+                        react_step.action_args.pop("repo_name", None)
+                        react_step.action_args["repo_path"] = planned_path
+                if not react_step.action_args.get("repo_path") and not react_step.action_args.get("repo_name"):
+                    react_step.action_args["repo_path"] = planned_path
+
+        elif tool == "execute_session_tool":
+            # Inject repo_path/name from previous setup/clone step context
+            planned_path = self._step_context.get("planned_repo_path", "")
+            if planned_path:
+                if not react_step.action_args.get("repo_path") and not react_step.action_args.get("repo_name"):
+                    react_step.action_args["repo_path"] = planned_path
+            # Inject sub-step callback so the frontend can show per-round progress
+            react_step.action_args["on_round"] = self._make_round_callback()
 
         elif tool == "clone_tool":
             stored_url = self._step_context.get("repo_url", "")
             llm_url = react_step.action_args.get("repo_url", "")
-            # Always trust the stored URL from source_tool over the LLM's guess.
-            # The LLM routinely hallucinates repo URLs (e.g. inventing
-            # ningyuanshao/SimCLR when source_tool found google-research/simclr).
+            # Trust the stored URL from source_tool over the LLM's guess,
+            # BUT only if the stored URL hasn't already been tried and failed.
             if stored_url and stored_url != llm_url:
-                self._log.info(
-                    f"Overriding hallucinated repo_url: {llm_url!r} → {stored_url!r}"
-                )
-                react_step.action_args["repo_url"] = stored_url
+                if stored_url in self._failed_urls:
+                    self._log.info(
+                        f"Stored URL {stored_url!r} previously failed, "
+                        f"allowing LLM URL: {llm_url!r}"
+                    )
+                else:
+                    self._log.info(
+                        f"Overriding hallucinated repo_url: {llm_url!r} → {stored_url!r}"
+                    )
+                    react_step.action_args["repo_url"] = stored_url
 
         elif tool == "fetch_tool":
             stored_url = self._step_context.get("paper_url", "")
@@ -718,6 +789,25 @@ class Orchestrator:
                     f"Enriching fetch_tool url: {llm_url!r} → {stored_url!r}"
                 )
                 react_step.action_args["url"] = stored_url
+
+    def _make_round_callback(self):
+        """Build a callback for execute_session_tool that emits sub-step events.
+
+        Called for each round in the session tool's internal loop, enabling
+        the frontend to show per-round progress within a parent step.
+        """
+        def on_round(round_num: int, phase: str, command: str,
+                     detail: str, status: str, max_rounds: int):
+            self._emit_step({
+                "type": "sub_step",
+                "phase": phase,
+                "round_num": round_num,
+                "max_rounds": max_rounds,
+                "command": command,
+                "detail": detail,
+                "status": status,
+            })
+        return on_round
 
     @staticmethod
     def _is_generic_command(cmd: str) -> bool:
@@ -747,19 +837,20 @@ class Orchestrator:
     def _allow_cross_tool_fix(error_type: str, current_tool: str, fix_tool: str) -> bool:
         """Allow retry to switch tools only for well-defined error→fix mappings."""
         allowed = {
-            # execute_tool / run_tool fails with missing deps → setup_tool
+            # execute_tool / run_tool / execute_session_tool fails with missing deps → setup_tool
             ("import_error", "execute_tool", "setup_tool"): True,
             ("import_error", "run_tool", "setup_tool"): True,
+            ("import_error", "execute_session_tool", "setup_tool"): True,
             ("pip_failed", "execute_tool", "setup_tool"): True,
             ("pip_failed", "run_tool", "setup_tool"): True,
+            ("pip_failed", "execute_session_tool", "setup_tool"): True,
             ("missing_requirements", "execute_tool", "setup_tool"): True,
             ("missing_requirements", "run_tool", "setup_tool"): True,
-            # setup_tool fails on venv → run_tool may still work
+            ("missing_requirements", "execute_session_tool", "setup_tool"): True,
+            # setup_tool fails on venv → execute may still work
             ("venv_failed", "setup_tool", "execute_tool"): True,
             ("venv_failed", "setup_tool", "run_tool"): True,
-            # clone failed → search may find alternative repo
-            ("not_found", "clone_tool", "search_tool"): True,
-            ("permission", "clone_tool", "search_tool"): True,
+            ("venv_failed", "setup_tool", "execute_session_tool"): True,
             # plan_run_tool can't find entry → read_repo_tool re-analyze
             ("no_entry_point", "plan_run_tool", "read_repo_tool"): True,
             ("cmd_not_found", "plan_run_tool", "read_repo_tool"): True,

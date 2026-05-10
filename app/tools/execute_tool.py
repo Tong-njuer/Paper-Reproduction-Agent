@@ -24,6 +24,7 @@ class ExecuteTool(BaseTool):
 
     # Entry-point scripts to look for (in priority order)
     ENTRY_SCRIPTS = [
+        "quick_test.py",  # preferred: lightweight test that needs no data/weights
         "main.py", "run.py", "train.py", "eval.py", "demo.py",
         "predict.py", "test.py", "infer.py", "inference.py",
         "run.sh", "start.sh",

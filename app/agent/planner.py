@@ -117,33 +117,34 @@ FULL_REPRODUCTION_PLAN = [
              tool_hint="source_tool"),
     PlanStep(step_id=4, description="克隆源码仓库到本地工作区",
              tool_hint="clone_tool"),
-    PlanStep(step_id=5, description="阅读仓库源码（README/requirements等）并配置Python虚拟环境，安装依赖",
-             tool_hint="setup_tool"),
-    PlanStep(step_id=6, description="阅读仓库README与入口文件，分析项目结构、框架与预期输出",
-             tool_hint="read_repo_tool"),
-    PlanStep(step_id=7, description="根据仓库分析结果，确定精确的执行命令（脚本路径+参数）",
-             tool_hint="plan_run_tool"),
-    PlanStep(step_id=8, description="在虚拟环境中执行复现命令，捕获stdout/stderr输出",
-             tool_hint="run_tool"),
-    PlanStep(step_id=9, description="汇总报告：论文信息、源码地址、本地路径、环境配置与执行结果",
+    PlanStep(step_id=5, description="对话式配置与执行：LLM创建venv、安装依赖、运行项目，观察输出、诊断错误、修复问题，直到成功或确认无法运行",
+             tool_hint="execute_session_tool"),
+    PlanStep(step_id=6, description="汇总报告：论文信息、源码地址、本地路径、环境配置与执行结果",
              tool_hint=""),
 ]
 
 SETUP_ONLY_PLAN = [
-    PlanStep(step_id=1, description="阅读仓库源码（README、requirements等），确定复现目标，创建venv并安装依赖",
-             tool_hint="setup_tool"),
-    PlanStep(step_id=2, description="汇总报告：环境配置结果与复现目标",
+    PlanStep(step_id=1, description="对话式配置与执行：LLM创建venv、安装依赖、运行项目，观察输出、诊断错误、修复问题，直到成功或确认无法运行",
+             tool_hint="execute_session_tool"),
+    PlanStep(step_id=2, description="汇总报告：环境配置结果与执行结果",
              tool_hint=""),
 ]
 
 EXECUTE_ONLY_PLAN = [
-    PlanStep(step_id=1, description="阅读仓库README与入口文件，分析项目结构、框架与预期输出",
-             tool_hint="read_repo_tool"),
-    PlanStep(step_id=2, description="根据仓库分析结果，确定精确的执行命令（脚本路径+参数）",
-             tool_hint="plan_run_tool"),
-    PlanStep(step_id=3, description="在虚拟环境中执行复现命令，捕获stdout/stderr输出",
-             tool_hint="run_tool"),
-    PlanStep(step_id=4, description="汇总报告：执行结果与项目信息",
+    PlanStep(step_id=1, description="对话式配置与执行：LLM创建venv、安装依赖、运行项目，观察输出、诊断错误、修复问题，直到成功或确认无法运行",
+             tool_hint="execute_session_tool"),
+    PlanStep(step_id=2, description="汇总报告：执行结果与项目信息",
+             tool_hint=""),
+]
+
+REPO_REPRODUCTION_PLAN = [
+    PlanStep(step_id=1, description="搜索目标仓库，获取GitHub仓库URL与基本信息",
+             tool_hint="search_tool"),
+    PlanStep(step_id=2, description="克隆源码仓库到本地工作区",
+             tool_hint="clone_tool"),
+    PlanStep(step_id=3, description="对话式配置与执行：LLM创建venv、安装依赖、运行项目，观察输出、诊断错误、修复问题，直到成功或确认无法运行",
+             tool_hint="execute_session_tool"),
+    PlanStep(step_id=4, description="汇总报告：项目信息、源码地址、本地路径、环境配置与执行结果",
              tool_hint=""),
 ]
 
@@ -183,22 +184,20 @@ class Planner:
 根据用户意图选择计划模式:
 - 给仓库URL找对应论文 → 访问仓库页面→提取论文链接→搜索论文→报告
 - 给论文信息找源码 → 搜论文→读论文→找源码→报告
-- 复现论文(完整) → 搜论文→读论文→找源码→克隆→配置环境→阅读仓库→规划命令→执行→报告
+- 复现论文(完整) → 搜论文→读论文→找源码→克隆→execute_session_tool配置与执行→报告
+- 复现指定项目/仓库（如"复现ML-From-Scratch"、"复现simclr"）→ search_tool搜索仓库URL→clone_tool克隆→execute_session_tool配置与执行→报告
+- 复现<仓库URL>（如"复现 https://github.com/xxx/yyy"）→ clone_tool克隆→execute_session_tool配置与执行→报告
 - 搜索/查询论文 → 搜论文→读论文→找源码→报告
 - 直接克隆仓库 → 克隆→报告
-- 配置环境（指定仓库或workspace中已有仓库）→ 阅读源码+创建venv+安装依赖→报告
-- 执行/运行（workspace中已有仓库且环境已配好）→ 阅读仓库→规划命令→执行→报告
-- 简单问答 → 1步直接回答
 
 重要:
-- 每步都需要 tool_hint 指定工具名（search_tool/fetch_tool/source_tool/clone_tool/setup_tool/read_repo_tool/plan_run_tool/run_tool/execute_tool）
+- 每步都需要 tool_hint 指定工具名（search_tool/fetch_tool/source_tool/clone_tool/execute_session_tool/error_handler_tool）
 - 最后一步始终是汇总报告（tool_hint为空字符串）
 - 避免多余步骤，但至少要包含 执行步+报告步 两步
 - 如果目标中已有URL（github.com等），直接使用而不要重新搜索
 - 如果用户给仓库URL要查论文 → fetch_tool访问仓库页面→search_tool搜索论文→汇总报告
-- 如果用户是"配置环境"且未指定仓库名，用setup_tool自动检测workspace中的仓库
-- 执行/运行类的目标应拆为三步: read_repo_tool(分析仓库) → plan_run_tool(确定命令) → run_tool(执行)
-- execute_tool 是旧版一体化执行工具，新计划请优先使用 read_repo_tool+plan_run_tool+run_tool
+- **任何涉及「配置环境」「安装依赖」「执行/运行项目」的目标，一律用单步 execute_session_tool 完成**。该工具让 LLM 自主创建 venv、安装依赖、诊断 pip 错误（如包名错误 sklearn→scikit-learn、版本冲突、编译器缺失）、运行项目并观察输出。不需要拆成 setup_tool + execute_session_tool 两步
+- setup_tool、read_repo_tool、plan_run_tool、run_tool、execute_tool 是旧版工具，已弃用，不要使用
 
 输出 JSON:
 {{"steps": [{{"step_id": 1, "description": "...", "tool_hint": "search_tool"}}]}}"""
@@ -216,6 +215,35 @@ class Planner:
         # Repo URL + paper intent → fetch repo page first, then search paper
         if self._has_repo_url(goal) and self._has_paper_intent(lower):
             return self._create_repo_to_paper_plan(goal)
+
+        # Reproduction — distinguish "复现论文" from "复现项目/仓库"
+        # Must come BEFORE plain URL/setup/execute checks so "复现 <URL>"
+        # doesn't get a bare clone plan without execution
+        if any(kw in lower for kw in ["复现", "reproduce", "复刻"]):
+            if self._has_paper_intent(lower):
+                # Paper reproduction: search paper → fetch → source → clone → execute → report
+                return Plan(goal=goal, steps=[
+                    PlanStep(step_id=s.step_id, description=s.description,
+                             tool_hint=s.tool_hint, expected_artifact=s.expected_artifact)
+                    for s in FULL_REPRODUCTION_PLAN
+                ])
+            elif self._has_repo_url(goal):
+                # Repo URL given directly → clone → execute → report (skip search)
+                return Plan(goal=goal, steps=[
+                    PlanStep(step_id=1, description="克隆源码仓库到本地工作区",
+                             tool_hint="clone_tool"),
+                    PlanStep(step_id=2, description="对话式配置与执行：LLM创建venv、安装依赖、运行项目",
+                             tool_hint="execute_session_tool"),
+                    PlanStep(step_id=3, description="汇总报告：项目信息、源码地址、环境配置与执行结果",
+                             tool_hint=""),
+                ])
+            else:
+                # Repo name given → search repo → clone → execute → report
+                return Plan(goal=goal, steps=[
+                    PlanStep(step_id=s.step_id, description=s.description,
+                             tool_hint=s.tool_hint, expected_artifact=s.expected_artifact)
+                    for s in REPO_REPRODUCTION_PLAN
+                ])
 
         # Repo URL → direct clone
         if self._has_repo_url(goal):
@@ -240,14 +268,6 @@ class Planner:
                 PlanStep(step_id=s.step_id, description=s.description,
                          tool_hint=s.tool_hint, expected_artifact=s.expected_artifact)
                 for s in EXECUTE_ONLY_PLAN
-            ])
-
-        # Full reproduction
-        if any(kw in lower for kw in ["复现", "reproduce", "复刻"]):
-            return Plan(goal=goal, steps=[
-                PlanStep(step_id=s.step_id, description=s.description,
-                         tool_hint=s.tool_hint, expected_artifact=s.expected_artifact)
-                for s in FULL_REPRODUCTION_PLAN
             ])
 
         # Search / query
@@ -361,12 +381,10 @@ class Planner:
 2. 保留已有的成功结果不重复
 3. **工具选择必须匹配任务类型**:
    - 需要克隆仓库 → clone_tool (repo_url 必须从历史记录中已找到的URL获取，绝不能编造)
-   - 缺少Python包/模块 → setup_tool (安装依赖)
-   - 需要分析仓库 → read_repo_tool
-   - 需要确定执行命令 → plan_run_tool
-   - 需要执行脚本 → run_tool
+   - 需要配置环境/安装依赖/执行脚本 → execute_session_tool (对话式配置与执行，LLM自主创建venv、安装依赖、诊断pip错误、运行项目)
    - 需要查找信息 → search_tool (仅用于学术论文搜索)
    - 不要用 search_tool 搜索安装方法或验证文件
+   - setup_tool、read_repo_tool、plan_run_tool、run_tool 是旧版工具，已弃用
 4. **失败的步骤必须重新尝试，不能跳过**: 如果 clone_tool 失败，替代方案中必须包含 clone_tool 重试（使用正确的URL），不能在仓库不存在的情况下跳到 setup_tool 或 run_tool
 5. **不要重复已成功的工作** — 已克隆成功的仓库不要再次克隆；未成功的则必须重试
 6. **最后一步必须是无 tool_hint 的汇总报告步骤**

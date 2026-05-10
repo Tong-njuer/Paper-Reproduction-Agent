@@ -260,32 +260,105 @@ class ErrorHandlerTool(BaseTool):
 
     def _handle_venv_failed(self, error: str, target: Path,
                             venv_python: Optional[str], **kwargs) -> ToolResult:
-        """Try to recreate the venv."""
+        """Recreate a broken venv, preserving the original Python version.
+
+        Reads pyvenv.cfg before deletion to find the base Python that was
+        used to create the venv, then reinstalls all dependencies afterwards.
+        """
         import shutil
         venv_path = target / VENV_DIR
 
+        # 1. Read the original Python version from the broken venv's config
+        original_python = self._read_venv_base_python(venv_path)
+
+        # 2. Find all requirement files BEFORE deleting the venv
+        req_files = self._find_requirement_files(target)
+
+        # 3. Remove the broken venv
         if venv_path.exists():
             self._log.info(f"Removing broken venv: {venv_path}")
             shutil.rmtree(str(venv_path), ignore_errors=True)
 
-        python_exe = sys.executable
-        self._log.info(f"Recreating venv with {python_exe}")
+        # 4. Recreate with the ORIGINAL Python version (not sys.executable)
+        python_exe = original_python or sys.executable
+        self._log.info(f"Recreating venv with {python_exe}"
+                       f"{' (from pyvenv.cfg)' if original_python else ' (fallback: sys.executable)'}")
         try:
             r = subprocess.run(
                 [python_exe, "-m", "venv", str(venv_path)],
                 capture_output=True, text=True, timeout=120,
                 env={**os.environ, "PYTHONUNBUFFERED": "1"},
             )
-            if r.returncode == 0:
-                new_python = _find_venv_python_static(target)
-                return self._ok(
-                    output=f"虚拟环境已重新创建: {venv_path}",
-                    fixed=True,
-                    venv_python=str(new_python) if new_python else "",
-                )
-            return self._fail(f"重新创建 venv 失败: {r.stderr[:200]}", fixed=False)
+            if r.returncode != 0:
+                return self._fail(f"重新创建 venv 失败: {r.stderr[:200]}", fixed=False)
         except Exception as e:
             return self._fail(f"重新创建 venv 异常: {e}", fixed=False)
+
+        new_python = _find_venv_python_static(target)
+        if not new_python:
+            return self._fail("venv 已重建但无法找到 Python 解释器", fixed=False)
+
+        # 5. Upgrade pip in the new venv
+        self._pip_install(str(new_python), "--upgrade", "pip")
+
+        # 6. Reinstall dependencies from previously found requirement files
+        installed = []
+        install_errors = []
+        for req_file in req_files:
+            self._log.info(f"Reinstalling from {req_file}")
+            ok, msg = self._pip_install(str(new_python), "-r", req_file)
+            if ok:
+                installed.append(req_file)
+            else:
+                install_errors.append(f"{Path(req_file).name}: {msg}")
+
+        if install_errors:
+            self._log.warning(f"Some deps failed to reinstall: {install_errors}")
+
+        return self._ok(
+            output=f"虚拟环境已重新创建并安装依赖: {venv_path}\n"
+                   f"原始 Python: {python_exe}\n"
+                   f"已安装: {', '.join(Path(r).name for r in installed)}"
+                   + (f"\n安装失败: {'; '.join(install_errors)}" if install_errors else ""),
+            fixed=True,
+            venv_python=str(new_python),
+        )
+
+    @staticmethod
+    def _read_venv_base_python(venv_path: Path) -> Optional[str]:
+        """Read the base Python executable from pyvenv.cfg if it exists."""
+        cfg = venv_path / "pyvenv.cfg"
+        if not cfg.exists():
+            return None
+        try:
+            content = cfg.read_text(encoding="utf-8", errors="ignore")
+            for line in content.splitlines():
+                line = line.strip()
+                if line.startswith("home ="):
+                    home = line.split("=", 1)[1].strip()
+                    # home is often already the bin directory
+                    for candidate in (
+                        str(Path(home) / "python3"),
+                        str(Path(home) / "python"),
+                        str(Path(home) / "bin" / "python3"),
+                        str(Path(home) / "bin" / "python"),
+                    ):
+                        if Path(candidate).exists():
+                            return candidate
+            return None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _find_requirement_files(target: Path) -> list[str]:
+        """Find dependency specification files in the repo."""
+        found = []
+        for name in ("requirements.txt", "requirements-dev.txt",
+                     "setup.py", "pyproject.toml"):
+            p = target / name
+            if p.exists():
+                found.append(str(p))
+        return found
 
     def _handle_auth_error(self, error: str, target: Path,
                             venv_python: str, **kwargs) -> ToolResult:
@@ -400,6 +473,7 @@ class ErrorHandlerTool(BaseTool):
 
     def _find_entry_files(self, target: Path) -> list[str]:
         ENTRY_SCRIPTS = [
+            "quick_test.py",  # preferred: lightweight test
             "main.py", "run.py", "train.py", "eval.py", "demo.py",
             "predict.py", "test.py", "infer.py", "inference.py",
             "run.sh", "start.sh",

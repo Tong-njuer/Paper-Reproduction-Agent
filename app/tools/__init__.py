@@ -51,6 +51,7 @@ def _build_registry():
     from app.tools.setup_tool import SetupTool
     from app.tools.execute_tool import ExecuteTool
     from app.tools.execution_steps import ReadRepoTool, PlanRunTool, RunTool
+    from app.tools.execute_session_tool import ExecuteSessionTool
     from app.tools.error_handler_tool import ErrorHandlerTool
     from app.tools._interfaces import ReportTool
 
@@ -63,6 +64,7 @@ def _build_registry():
     register_tool(ReadRepoTool())
     register_tool(PlanRunTool())
     register_tool(RunTool())
+    register_tool(ExecuteSessionTool())
     register_tool(ErrorHandlerTool())
     register_tool(ReportTool())
 

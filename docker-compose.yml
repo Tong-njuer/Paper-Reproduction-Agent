@@ -22,6 +22,7 @@ services:
       - AGENT_REPLAN_THRESHOLD=${AGENT_REPLAN_THRESHOLD:-3}
       - AGENT_ENABLE_REFLECTION=${AGENT_ENABLE_REFLECTION:-true}
       - AGENT_ENABLE_MEMORY=${AGENT_ENABLE_MEMORY:-true}
+      - PIP_INDEX_URL=${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
       - WORKSPACE_DIR=${WORKSPACE_DIR:-./workspace}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - LOG_DIR=${LOG_DIR:-./logs}

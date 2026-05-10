@@ -25,6 +25,7 @@ from app.tools import BaseTool, ToolResult
 VENV_DIR = ".venv"
 
 ENTRY_SCRIPTS = [
+    "quick_test.py",  # preferred: lightweight test that needs no data/weights
     "main.py", "run.py", "train.py", "eval.py", "demo.py",
     "predict.py", "test.py", "infer.py", "inference.py",
     "run.sh", "start.sh",
@@ -183,7 +184,6 @@ class ReadRepoTool(BaseTool):
 
     def _extract_usage_commands(self, readme: str) -> list[str]:
         commands = []
-        # Code blocks
         code_blocks = re.findall(
             r'```(?:bash|sh|shell|python)?\s*\n(.+?)\n```',
             readme, re.DOTALL,
@@ -205,7 +205,6 @@ class ReadRepoTool(BaseTool):
                 elif re.search(r'python3?\s+-m\s+\S+', line):
                     commands.append(line)
 
-        # Inline code `python main.py ...`
         inline = re.findall(r'`([^`]*python[^`]*\.py[^`]*)`', readme)
         for line in inline:
             line = line.strip()
@@ -214,7 +213,6 @@ class ReadRepoTool(BaseTool):
             if re.search(r'python3?\s+\S+\.py', line):
                 commands.append(line)
 
-        # Deduplicate
         seen = set()
         unique = []
         for c in commands:
@@ -312,8 +310,12 @@ class PlanRunTool(BaseTool):
                 local_path=str(target),
             )
 
-        # Re-analyze repo to determine entry point (lightweight, no README re-read needed)
+        # Re-analyze repo to determine entry point
+        readme = _read_readme(target)
         entry_files = self._find_entry_files(target)
+
+        # Check README for a "Quick test" section command — prefer this
+        quick_test_cmd = self._extract_quick_test_command(readme, venv_python)
 
         if command:
             final_cmd = command
@@ -321,6 +323,9 @@ class PlanRunTool(BaseTool):
         elif script:
             final_cmd = f"{venv_python} {script}"
             cmd_source = f"用户指定脚本: {script}"
+        elif quick_test_cmd:
+            final_cmd = quick_test_cmd
+            cmd_source = "README Quick test 章节自动检测"
         elif entry_files:
             best = entry_files[0]
             if best.endswith(".ipynb"):
@@ -341,6 +346,7 @@ class PlanRunTool(BaseTool):
 
         output = (
             f"执行计划确定: {target.name}\n"
+            f"路径: {target}\n"
             f"命令来源: {cmd_source}\n"
             f"命令: {final_cmd}\n"
             f"Python: {venv_python}\n"
@@ -356,6 +362,37 @@ class PlanRunTool(BaseTool):
             cmd_source=cmd_source,
             timeout=timeout,
         )
+
+    def _extract_quick_test_command(self, readme: str, venv_python: str) -> str:
+        """Extract a quick-test / simple-reproduction command from README.
+
+        Looks for a "Quick test" section with a runnable command
+        that requires no extra data or arguments.
+        """
+        if not readme:
+            return ""
+        section_match = re.search(
+            r'#{1,3}\s*(?:Quick\s*[Tt]est|快速测试|简单复现|Quick\s*[Ss]tart)'
+            r'.*?\n(.*?)(?=#{1,3}\s+\S|\Z)',
+            readme, re.DOTALL,
+        )
+        if not section_match:
+            return ""
+        section = section_match.group(1)
+        code_blocks = re.findall(
+            r'```(?:bash|sh|shell|python)?\s*\n(.+?)\n```',
+            section, re.DOTALL,
+        )
+        for block in code_blocks:
+            for line in block.strip().split("\n"):
+                line = line.strip()
+                if line.startswith("#") or line.startswith("//"):
+                    continue
+                m = re.search(r'(?:python3?)\s+(\S+\.py)', line)
+                if m:
+                    script_name = m.group(1)
+                    return f"{venv_python} {script_name}"
+        return ""
 
     def _find_entry_files(self, target: Path) -> list[str]:
         found = []

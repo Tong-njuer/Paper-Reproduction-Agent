@@ -1,3 +1,4 @@
+import re
 from typing import List, Optional
 
 from app.core.llm import get_llm
@@ -92,6 +93,33 @@ class Reflection:
             lesson=lesson, should_replan=should_replan,
         )
 
+    @staticmethod
+    def _is_genuine_venv_error(error_lower: str) -> bool:
+        """True only if the error is about the venv itself being broken.
+
+        We intentionally ignore cases where "venv" just appears in a
+        command path (e.g. /app/.../.venv/bin/python) because those are
+        regular script execution failures, not venv setup failures.
+        """
+        # Explicit venv creation/use failures
+        if any(kw in error_lower for kw in [
+            "venv creation failed",
+            "virtual environment creation failed",
+            "venv module not found",
+            "no module named venv",
+            "no module named virtualenv",
+            "ensurepip failed",
+            "failed to create virtual environment",
+        ]):
+            return True
+        # "No such file" involving the venv python binary
+        if re.search(r'no such file.*\.venv[/\\](?:bin|Scripts)[/\\]python', error_lower):
+            return True
+        # "Command not found" for the venv python
+        if re.search(r'(?:command not found|无法找到).*\.venv[/\\](?:bin|Scripts)', error_lower):
+            return True
+        return False
+
     def _analyze_pattern(self, error: str) -> ErrorAnalysis:
         el = error.lower()
         # Specific patterns first (before generic ones like "not found")
@@ -103,6 +131,11 @@ class Reflection:
         ]):
             return ErrorAnalysis("no_entry_point",
                                  "仓库中未找到可自动检测的入口文件（.py/.ipynb），需手动指定命令", "medium")
+        # venv_failed: check BEFORE import_error / missing_file so that
+        # "No module named ensurepip" or "No such file: .../.venv/bin/python"
+        # are classified as venv failures rather than import/missing file errors.
+        elif self._is_genuine_venv_error(el):
+            return ErrorAnalysis("venv_failed", "虚拟环境创建或使用失败", "medium")
         elif any(kw in el for kw in ["modulenotfound", "no module named",
                                        "importerror", "导入失败"]):
             return ErrorAnalysis("import_error", "Python 包导入/模块未找到，依赖可能未正确安装", "medium")
@@ -136,8 +169,6 @@ class Reflection:
         # Setup/environment errors
         elif any(kw in el for kw in ["pip", "安装失败", "install failed", "pip install"]):
             return ErrorAnalysis("pip_failed", "pip 依赖安装失败", "medium")
-        elif any(kw in el for kw in ["venv", "虚拟环境", "virtual environment"]):
-            return ErrorAnalysis("venv_failed", "虚拟环境创建或使用失败", "medium")
         elif any(kw in el for kw in ["requirements", "依赖文件", "未找到.*文件"]):
             return ErrorAnalysis("missing_requirements", "未找到依赖配置文件", "low")
         elif any(kw in el for kw in ["import", "导入", "no module"]):

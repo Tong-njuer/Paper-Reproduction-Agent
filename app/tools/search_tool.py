@@ -24,10 +24,13 @@ class SearchTool(BaseTool):
 
         self._log.info(f"Search: [{source}] {query[:80]}")
 
-        # Always try arXiv first for academic papers — it is the most
-        # reliable source and doesn't hallucinate.  Fall back to LLM
-        # only if arXiv returns nothing.
-        if source in ("llm", "arxiv"):
+        # Repo search queries: skip arXiv — it indexes papers, not repos.
+        # Go straight to LLM (which knows well-known repo URLs) or web search.
+        repo_kw = ["github", "gitlab", "repository", "repo", "源码", "仓库",
+                   "clone", "克隆", "code", "implementation", "实现"]
+        is_repo_search = any(kw in query.lower() for kw in repo_kw)
+
+        if source in ("llm", "arxiv") and not is_repo_search:
             try:
                 arxiv_result = self._search_arxiv(query)
                 if arxiv_result.success and arxiv_result.metadata.get("results"):
@@ -50,6 +53,27 @@ class SearchTool(BaseTool):
                     f"请尝试调整搜索词，或使用 source=web / source=wikipedia。"
                 )
             return self._search_via_llm(query)
+
+        # Repo search (or explicitly non-arxiv source): skip arXiv entirely.
+        # arXiv indexes academic papers, not code repos.  Use LLM (which
+        # knows well-known repo URLs) or web search directly.
+        if is_repo_search and source in ("llm", "arxiv"):
+            self._log.info(f"Repo search detected, using LLM instead of arXiv")
+            try:
+                llm_result = self._search_via_llm(query)
+                if llm_result.success:
+                    return llm_result
+            except Exception:
+                pass
+            # LLM failed — try web search as fallback
+            try:
+                return self._search_web(query)
+            except Exception:
+                pass
+            return self._fail(
+                f"LLM 和 web 搜索均未找到 '{query}'。"
+                f"请直接提供仓库 URL。"
+            )
 
         # Wikipedia / web — try directly, no arXiv fallback
         try:

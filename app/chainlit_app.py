@@ -453,6 +453,16 @@ async def _handle_agent_task(raw_goal: str):
                 desc = ev.get("description", "")
                 step.name = f"Agent Execution · {desc}"
                 await step.update()
+            elif t == "sub_step":
+                rnd = ev.get("round_num", 0)
+                max_rnd = ev.get("max_rounds", 0)
+                phase = ev.get("phase", "")
+                if phase == "run":
+                    step.name = f"Agent Execution · Round {rnd}/{max_rnd}"
+                    await step.update()
+                elif phase == "reflect":
+                    step.name = f"Agent Execution · Reflecting..."
+                    await step.update()
 
     # ── 6. Finalise agent ──
     thread.join(timeout=3.0)
@@ -485,6 +495,15 @@ async def _handle_agent_task(raw_goal: str):
     ack_content = _build_summary(result, all_step_events)
     ack = cl.Message(content=ack_content)
     await ack.send()
+
+    # Send full report as a separate message if available
+    if result and result.get("summary"):
+        full_report = result["summary"]
+        # Only send as separate message if it's substantially longer
+        # than the brief ack (which already includes the summary inline)
+        if len(full_report) > 300:
+            report_msg = cl.Message(content=f"### 📋 完整复现报告\n\n{full_report}")
+            await report_msg.send()
 
     # Store for context
     if result:
@@ -548,5 +567,34 @@ def _format_step_event(ev: dict, plan_items: list[dict]) -> str | None:
     elif t == "replan":
         new_count = len(ev.get("steps", []))
         return f"  [REPLAN] {new_count} new steps\n"
+
+    elif t == "sub_step":
+        phase = ev.get("phase", "")
+        rnd = ev.get("round_num", 0)
+        max_rnd = ev.get("max_rounds", 0)
+        if phase == "run":
+            reason = ev.get("detail", "")[:120]
+            cmd = ev.get("command", "")[:150]
+            lines = [f"    ── Round {rnd}/{max_rnd} ──"]
+            if reason:
+                lines.append(f"    {reason}")
+            lines.append(f"    $ {cmd}")
+            return "\n".join(lines) + "\n"
+        elif phase == "result":
+            status = ev.get("status", "")
+            detail = ev.get("detail", "")
+            tag = "[OK]" if status == "success" else "[FAIL]"
+            return f"    {tag}  {detail}\n"
+        elif phase == "done":
+            detail = ev.get("detail", "")[:200]
+            status = ev.get("status", "")
+            tag = "[DONE]" if status == "success" else "[FAIL]"
+            return f"    {tag}  {detail}\n\n"
+        elif phase == "error":
+            detail = ev.get("detail", "")[:200]
+            return f"    [FATAL] {detail}\n"
+        elif phase == "reflect":
+            detail = ev.get("detail", "")[:200]
+            return f"\n    [REFLECT] {detail}\n"
 
     return None
