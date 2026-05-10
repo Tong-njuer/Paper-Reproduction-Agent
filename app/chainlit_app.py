@@ -38,10 +38,20 @@ AGENT_KEYWORDS = [
     "下载仓库", "下载代码",
     "跑一下", "运行实验", "执行", "run experiment",
     "配置环境", "setup", "环境配置", "安装依赖", "配置依赖",
+    # Auxiliary tools
+    "工作区", "workspace",
+    "报告", "report",
+    "仓库", "repo",
+    "配置", "config",
+    "设置", "settings",
+    "统计", "stats", "statistics",
+    "清理", "clean",
+    "检查仓库", "仓库状态",
 ]
 
 _CLASSIFY_PROMPT = """判断用户意图：
 - 用户要求复现论文、搜索论文、克隆/下载代码仓库、执行实验 → 回复 AGENT
+- 用户要求查看/管理报告、查看/管理工作区、查看/清理仓库、查看配置、查看统计 → 回复 AGENT
 - 用户是简单问答、闲聊、询问已有论文内容 → 回复 QA
 只回复 AGENT 或 QA，不要其他内容。
 
@@ -80,14 +90,13 @@ def _enrich_goal(goal: str) -> str:
     if has_clone_intent and not has_url and source_url:
         return f"{goal}\n\n（上下文：上一次找到的源码仓库地址是 {source_url}）"
 
-    # If the user asks about reproducing but we already have paper content,
-    # add a hint that we already have the paper
+    # If the user asks about reproducing and we already know the source URL,
+    # provide it as context (but don't tell the planner to skip steps).
     has_repro_intent = any(kw in goal.lower() for kw in ["复现", "复刻", "reproduce"])
-    if has_repro_intent and paper_content:
+    if has_repro_intent and source_url and not has_url:
         return (
             f"{goal}\n\n"
-            f"（上下文：上一次已经搜索过此论文，源码地址: {source_url}。"
-            f"请基于已有信息继续，不要重复搜索。）"
+            f"（提示：之前找到的源码地址是 {source_url}，可直接用于克隆。）"
         )
 
     # If the user asks to setup/configure environment without specifying a repo,
@@ -129,10 +138,17 @@ def _build_summary(result: dict | None, steps: list[dict]) -> str:
 
     # Final outcome per step_id (last observation wins)
     step_outcomes: dict[str, bool] = {}
+    # Last successful observation per step_id → output text
+    step_outputs: dict[int, str] = {}
     for s in steps:
         if s.get("type") == "observation":
             sid = s.get("step_id", "")
             step_outcomes[sid] = s.get("status") == "success"
+            if s.get("status") == "success":
+                obs = s.get("observation", "")
+                # Strip leading status prefixes like "[SUCCESS]" "[OK]"
+                if obs:
+                    step_outputs[sid] = obs
 
     total = len(step_outcomes) or len(plan_items)
     success_count = sum(1 for v in step_outcomes.values() if v)
@@ -154,6 +170,17 @@ def _build_summary(result: dict | None, steps: list[dict]) -> str:
     if not persistent_errors:
         persistent_errors = result.get("errors", [])
 
+    # All step tool_hints from the plan (so we know what type of plan this is)
+    plan_tools = {s.get("tool_hint", "") for s in plan_items}
+    aux_tools = {
+        "list_workspace_tool", "config_tool", "stats_tool",
+        "list_reports_tool", "view_report_tool", "search_reports_tool",
+        "delete_report_tool", "check_repo_tool", "workspace_cleanup_tool",
+    }
+    is_aux_plan = bool(plan_tools & aux_tools) or (
+        len(plan_items) == 1 and total <= 1 and not source_url
+    )
+
     lines = []
 
     if agent_success:
@@ -172,6 +199,34 @@ def _build_summary(result: dict | None, steps: list[dict]) -> str:
 
     if source_url:
         lines.append(f"\n📦 **源码仓库**: [{source_url}]({source_url})")
+
+    # --- Show tool outputs in the main message area ---
+    # For auxiliary tools (config, workspace, reports, etc.), the tool
+    # output IS the answer the user wants.  Include it directly.
+    # For reproduction tasks, only include execution-step outputs.
+    if step_outputs:
+        if is_aux_plan:
+            # Aux query — show all tool outputs as the main reply
+            for sid in sorted(step_outputs.keys()):
+                output = step_outputs[sid].strip()
+                if output:
+                    lines.append(f"\n{output}")
+        else:
+            # Reproduction task — include execute_session_tool or run outputs
+            for sid in sorted(step_outputs.keys()):
+                output = step_outputs[sid].strip()
+                if output and len(output) > 50:
+                    # Check if this step maps to an execute/run tool
+                    step_desc = ""
+                    for p in plan_items:
+                        if p.get("step_id") == sid:
+                            step_desc = p.get("description", "")
+                            break
+                    exec_keywords = ["执行", "运行", "execute", "run", "复现"]
+                    if any(kw in step_desc.lower() for kw in exec_keywords) or \
+                       any(kw in step_desc.lower() for kw in ["配置", "环境", "setup"]):
+                        # Show the first 2000 chars of execution output
+                        lines.append(f"\n### 执行结果\n{output[:2000]}")
 
     if paper_info.get("urls"):
         seen = set()
@@ -230,11 +285,28 @@ async def on_chat_start():
     config = get_config()
     cl.user_session.set("config", config)
 
+    provider = config.llm.provider
+    _PROVIDER_MODELS = {
+        "deepseek": ["deepseek-chat", "deepseek-reasoner",
+                      "deepseek-v4-pro"],
+        "zhipu": ["glm-4-plus", "glm-4-flash", "glm-4", "glm-3-turbo"],
+    }
+    model_values = _PROVIDER_MODELS.get(provider, _PROVIDER_MODELS["zhipu"])
+    # Ensure current model is in the list
+    current_model = config.llm.model
+    if current_model not in model_values:
+        model_values = [current_model] + model_values
+
     await cl.ChatSettings([
         Select(
+            id="provider", label="LLM 提供商",
+            values=["deepseek", "zhipu"],
+            initial_value=provider,
+        ),
+        Select(
             id="model", label="模型",
-            values=["glm-4-plus", "glm-4-flash", "glm-4", "glm-3-turbo"],
-            initial_value=config.llm.model,
+            values=model_values,
+            initial_value=current_model,
         ),
         Slider(
             id="max_steps", label="最大步数",
@@ -263,9 +335,29 @@ async def on_settings_update(settings: dict):
     config = cl.user_session.get("config")
     if config is None:
         return
-    # Apply settings directly to the config object
+
+    # Provider change → update base_url and api_key too
+    if "provider" in settings:
+        new_provider = settings["provider"]
+        config.llm.provider = new_provider
+        _DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
+        _ZHIPU_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        if new_provider == "deepseek":
+            import os
+            config.llm.base_url = _DEEPSEEK_URL
+            config.llm.api_key = os.getenv("DEEPSEEK_API_KEY", "") or config.llm.api_key
+        else:
+            config.llm.base_url = _ZHIPU_URL
+            config.llm.api_key = os.getenv("ZHIPU_API_KEY", "") or config.llm.api_key
+        # Reset LLM singleton so next call picks up new config
+        import app.core.llm as llm_mod
+        llm_mod._llm = None
+
     if "model" in settings:
         config.llm.model = settings["model"]
+        import app.core.llm as llm_mod
+        llm_mod._llm = None
+
     if "max_steps" in settings:
         config.agent.max_steps = settings["max_steps"]
     if "enable_reflection" in settings:

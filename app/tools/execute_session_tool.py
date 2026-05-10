@@ -467,8 +467,6 @@ class ExecuteSessionTool(BaseTool):
 
     def _ask_llm(self, llm, conversation: list[dict]) -> dict:
         """Send conversation to LLM, return parsed decision."""
-        # Convert conversation to a single prompt for generate_structured
-        # since the API uses messages format natively
         messages = list(conversation)
 
         # Add a final reminder
@@ -476,12 +474,13 @@ class ExecuteSessionTool(BaseTool):
             "role": "user",
             "content": (
                 "请决定下一步: 运行命令还是结束会话?\n"
-                "输出 JSON: {\"action\": \"run\"|\"done\", ...}"
+                "请用 JSON 格式回复（不要用其他格式）:\n"
+                '运行命令: {"action": "run", "command": "要执行的命令", "reason": "说明"}\n'
+                '结束会话: {"action": "done", "success": true|false, "summary": "总结"}'
             ),
         })
 
         # Build a combined prompt for the generate_structured method
-        # Extract system message first
         system_msg = ""
         user_messages = []
         for m in messages:
@@ -495,7 +494,105 @@ class ExecuteSessionTool(BaseTool):
         prompt = "\n\n".join(user_messages)
         system = system_msg if system_msg else None
 
-        return llm.generate_structured(prompt, system_prompt=system)
+        try:
+            return llm.generate_structured(prompt, system_prompt=system)
+        except RuntimeError:
+            # DeepSeek sometimes returns "[reason]$ command" format instead of JSON.
+            # Try to extract the command from the raw response.
+            raw = llm.generate(prompt, system_prompt=system).content
+            decision = self._parse_freeform_decision(raw)
+            if decision:
+                self._log.warning(
+                    f"LLM returned non-JSON format, parsed manually: "
+                    f"{decision.get('action', '?')}"
+                )
+                return decision
+            raise
+
+    # ------------------------------------------------------------------
+    # Freeform decision parser (fallback when LLM doesn't return JSON)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_freeform_decision(text: str) -> dict | None:
+        """Try to extract a run/done decision from non-JSON LLM output.
+
+        Handles formats like:
+          [reason]$ command
+          action: run
+          {"action": "done" ...
+        """
+        import re
+        text = text.strip()
+
+        # Strategy 1: Check if there's JSON buried in the text (brace matching)
+        brace_start = text.find("{")
+        if brace_start >= 0:
+            depth = 0
+            for i in range(brace_start, len(text)):
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        import json
+                        try:
+                            return json.loads(text[brace_start:i + 1])
+                        except json.JSONDecodeError:
+                            break
+
+        # Strategy 2: "[reason]$ command" format → action=run
+        m = re.match(r'^\[([^\]]*)\]\s*\$\s*(.+)$', text, re.DOTALL)
+        if m:
+            return {
+                "action": "run",
+                "reason": m.group(1).strip()[:200],
+                "command": m.group(2).strip(),
+            }
+
+        # Strategy 3: "$ command" format (no reason) → action=run
+        m = re.match(r'^\$\s*(.+)$', text.strip())
+        if m:
+            return {
+                "action": "run",
+                "reason": "executing command",
+                "command": m.group(1).strip(),
+            }
+
+        # Strategy 4: Lines starting with a shell command pattern
+        for line in text.split("\n"):
+            line = line.strip()
+            # Skip conversational lines
+            if not line or line.startswith("[") or line.startswith("#"):
+                continue
+            # Looks like a shell command (contains common patterns)
+            if re.match(
+                r'^(python|pip|cd\s|ls\s|cat\s|grep\s|find\s|'
+                r'\.venv/bin/|\.venv/Scripts/|'
+                r'\$|apt|brew|conda|git\s|make|cmake|'
+                r'wget|curl|./|bash\s|sh\s)',
+                line
+            ):
+                return {
+                    "action": "run",
+                    "reason": "extracted from freeform response",
+                    "command": line,
+                }
+
+        # Strategy 5: Check for done/success keywords
+        done_keywords = ["done", "成功", "success", "完成", "finished",
+                         "conclusion", "总结", "结论"]
+        if any(kw in text.lower() for kw in done_keywords):
+            # Try to extract success/failure
+            success = not any(kw in text.lower() for kw in
+                             ["fail", "失败", "error", "错误", "unable", "无法"])
+            return {
+                "action": "done",
+                "success": success,
+                "summary": text[:500],
+            }
+
+        return None
 
     # ------------------------------------------------------------------
     # Command execution

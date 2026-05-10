@@ -39,22 +39,40 @@ class Config(BaseModel):
 
     @classmethod
     def from_env(cls) -> "Config":
-        api_key = os.getenv("ZHIPU_API_KEY")
+        provider = os.getenv("LLM_PROVIDER", "zhipu").lower()
+
+        # Resolve API key: provider-specific → generic → error
+        api_key = (
+            os.getenv("DEEPSEEK_API_KEY") or
+            os.getenv("ZHIPU_API_KEY") or
+            os.getenv("LLM_API_KEY")
+        )
         if not api_key:
             raise RuntimeError(
-                "ZHIPU_API_KEY is required. Set it in .env file or environment variables."
+                "No API key found. Set DEEPSEEK_API_KEY, ZHIPU_API_KEY, or "
+                "LLM_API_KEY in .env file."
             )
+
+        # Default model & base_url per provider
+        provider_defaults = {
+            "deepseek": {
+                "model": "deepseek-chat",
+                "base_url": "https://api.deepseek.com/v1/chat/completions",
+            },
+            "zhipu": {
+                "model": "glm-4-plus",
+                "base_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+            },
+        }
+        defaults = provider_defaults.get(provider, provider_defaults["zhipu"])
 
         return cls(
             llm=LLMConfig(
-                provider=os.getenv("LLM_PROVIDER", "zhipu"),
-                model=os.getenv("LLM_MODEL", "glm-4-plus"),
+                provider=provider,
+                model=os.getenv("LLM_MODEL", defaults["model"]),
                 api_key=api_key,
-                base_url=os.getenv(
-                    "LLM_BASE_URL",
-                    "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-                ),
-                max_tokens=int(os.getenv("LLM_MAX_TOKENS", "4096")),
+                base_url=os.getenv("LLM_BASE_URL", defaults["base_url"]),
+                max_tokens=int(os.getenv("LLM_MAX_TOKENS", "65536")),
                 temperature=float(os.getenv("LLM_TEMPERATURE", "0.7")),
             ),
             agent=AgentConfig(

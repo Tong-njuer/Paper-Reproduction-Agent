@@ -143,6 +143,7 @@ class ReActEngine:
 
     def _default_args(self, step, tool_name: str) -> dict:
         """Build default args for a tool based on step description."""
+        import re
         desc = step.description.lower()
         if tool_name == "search_tool":
             return {"query": step.description}
@@ -163,9 +164,36 @@ class ReActEngine:
             return {"command": ""}
         elif tool_name == "execute_tool":
             return {}
+        # --- Auxiliary tools ---
+        elif tool_name == "view_report_tool":
+            rid = re.search(r'(report_\w+)', step.description)
+            return {"report_id": rid.group(1) if rid else ""}
+        elif tool_name == "search_reports_tool":
+            return {"query": step.description}
+        elif tool_name == "list_reports_tool":
+            return {}
+        elif tool_name == "delete_report_tool":
+            rid = re.search(r'(report_\w+)', step.description)
+            return {"report_id": rid.group(1) if rid else ""}
+        elif tool_name == "list_workspace_tool":
+            return {}
+        elif tool_name == "check_repo_tool":
+            return {"repo_name": step.description}
+        elif tool_name == "workspace_cleanup_tool":
+            name_match = re.search(r'(?:仓库|repo|删除|remove)\s*[：:]*\s*([a-zA-Z0-9_.-]{2,40})', desc)
+            return {"repo_name": name_match.group(1) if name_match else ""}
+        elif tool_name == "config_tool":
+            return {}
+        elif tool_name == "stats_tool":
+            return {}
+        elif tool_name == "error_handler_tool":
+            return {}
+        elif tool_name == "execute_session_tool":
+            return {}
         return {}
 
     def _fallback_decide(self, step) -> ReActStep:
+        import re
         if step.tool_hint:
             hint = step.tool_hint
             if hint == "search_tool":
@@ -186,6 +214,35 @@ class ReActEngine:
                 args = {}
             elif hint == "execute_tool":
                 args = {"repo_path": "", "timeout": 600}
+            # --- Auxiliary tools ---
+            elif hint == "view_report_tool":
+                rid = re.search(r'(report_\w+)', step.description)
+                args = {"report_id": rid.group(1) if rid else ""}
+            elif hint == "search_reports_tool":
+                args = {"query": step.description}
+            elif hint == "list_reports_tool":
+                args = {}
+            elif hint == "delete_report_tool":
+                rid = re.search(r'(report_\w+)', step.description)
+                args = {"report_id": rid.group(1) if rid else ""}
+            elif hint == "list_workspace_tool":
+                args = {}
+            elif hint == "check_repo_tool":
+                args = {"repo_name": step.description}
+            elif hint == "workspace_cleanup_tool":
+                name_match = re.search(
+                    r'(?:仓库|repo|删除|remove)\s*[：:]*\s*([a-zA-Z0-9_.-]{2,40})',
+                    step.description.lower()
+                )
+                args = {"repo_name": name_match.group(1) if name_match else ""}
+            elif hint == "config_tool":
+                args = {}
+            elif hint == "stats_tool":
+                args = {}
+            elif hint == "error_handler_tool":
+                args = {}
+            elif hint == "execute_session_tool":
+                args = {}
             else:
                 args = {}
             return ReActStep(

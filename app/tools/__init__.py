@@ -53,6 +53,15 @@ def _build_registry():
     from app.tools.execution_steps import ReadRepoTool, PlanRunTool, RunTool
     from app.tools.execute_session_tool import ExecuteSessionTool
     from app.tools.error_handler_tool import ErrorHandlerTool
+    from app.tools.list_workspace_tool import ListWorkspaceTool
+    from app.tools.report_store import (
+        ListReportsTool, ViewReportTool,
+        SearchReportsTool, DeleteReportTool,
+    )
+    from app.tools.check_repo_tool import CheckRepoTool
+    from app.tools.workspace_cleanup_tool import WorkspaceCleanupTool
+    from app.tools.config_tool import ConfigTool
+    from app.tools.stats_tool import StatsTool
     from app.tools._interfaces import ReportTool
 
     register_tool(SearchTool())
@@ -66,6 +75,15 @@ def _build_registry():
     register_tool(RunTool())
     register_tool(ExecuteSessionTool())
     register_tool(ErrorHandlerTool())
+    register_tool(ListWorkspaceTool())
+    register_tool(ListReportsTool())
+    register_tool(ViewReportTool())
+    register_tool(SearchReportsTool())
+    register_tool(DeleteReportTool())
+    register_tool(CheckRepoTool())
+    register_tool(WorkspaceCleanupTool())
+    register_tool(ConfigTool())
+    register_tool(StatsTool())
     register_tool(ReportTool())
 
 

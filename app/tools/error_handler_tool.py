@@ -411,6 +411,14 @@ class ErrorHandlerTool(BaseTool):
         """Try to auto-detect the error type and apply the right fix."""
         el = error.lower()
 
+        # LLM / parse errors — not fixable by ErrorHandler, must go to Reflection
+        if any(kw in el for kw in ["llm 调用失败", "failed to parse json",
+                                     "llm api", "parse_error"]):
+            return self._fail(
+                f"LLM/解析错误，不在 ErrorHandler 处理范围，应交由 Reflection: {error[:150]}",
+                fixed=False,
+            )
+
         if any(kw in el for kw in ["modulenotfound", "no module named"]):
             return self._handle_import_error(error, target, venv_python)
         elif any(kw in el for kw in [
@@ -418,7 +426,9 @@ class ErrorHandlerTool(BaseTool):
             "authentication failed", "fatal: could not read",
         ]):
             return self._handle_auth_error(error, target, venv_python)
-        elif any(kw in el for kw in ["pip", "安装失败", "install failed"]):
+        elif any(kw in el for kw in ["pip install", "安装失败", "install failed",
+                                       "no matching distribution"]):
+            # Only match pip install FAILURES, not just any "pip" mention
             return self._handle_pip_failed(error, target, venv_python)
         elif any(kw in el for kw in ["命令未找到", "command not found"]):
             return self._handle_cmd_not_found(error, target, venv_python)

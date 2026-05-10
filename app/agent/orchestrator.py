@@ -11,6 +11,8 @@ from app.agent.planner import Planner, Plan, PlanStep
 from app.agent.react import ReActEngine, ReActStep
 from app.agent.reflection import Reflection, ReflectionResult
 from app.tools import list_available_tools, get_tool
+from app.tools.report_store import get_report_store
+from datetime import datetime
 
 
 class AgentResult:
@@ -315,7 +317,30 @@ class Orchestrator:
         self._emit_step({"type": "done", "result": result.to_dict()})
         self._emit_log("info" if result.success else "error",
                        f"执行结束: {result.summary}")
+
+        # Auto-save report when there is meaningful output
+        if result.steps or result.summary:
+            self._save_report(result)
+
         return result
+
+    def _save_report(self, result: AgentResult):
+        """Persist the final report to ReportStore."""
+        try:
+            store = get_report_store()
+            report = {
+                "goal": result.goal,
+                "success": result.success,
+                "timestamp": datetime.now().isoformat(),
+                "summary": result.summary,
+                "source_url": result.source_url,
+                "paper_info": result.paper_info,
+                "steps": result.steps,
+                "errors": result.errors,
+            }
+            store.save(report)
+        except Exception as e:
+            self._log.warning(f"Failed to auto-save report: {e}")
 
     def _extract_result_info(self, result: AgentResult, step, observation: str):
         desc = step.description.lower()
@@ -632,12 +657,12 @@ class Orchestrator:
 
     @staticmethod
     def _is_summary_step(step: PlanStep) -> bool:
-        """A step is a summary step if it has no tool_hint or is explicitly a report step."""
+        """A step is a summary step only if it has no concrete tool assigned."""
         if not step.tool_hint or step.tool_hint in ("", "report", "report_tool"):
             return True
-        desc = step.description.lower()
-        summary_kw = ["汇总", "报告", "总结", "summary", "report", "验证克隆结果并报告"]
-        return any(kw in desc for kw in summary_kw)
+        # If a real registered tool is assigned, it is NOT a summary step —
+        # even if the description contains words like "报告" or "汇总".
+        return False
 
     def _handle_summary_step(self, step: PlanStep, result: AgentResult, plan: Plan):
         """Generate final report using ReportTool, bypassing ReAct."""

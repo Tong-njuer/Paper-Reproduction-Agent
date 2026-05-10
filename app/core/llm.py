@@ -1,4 +1,5 @@
 import json
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -45,49 +46,82 @@ class LLMInterface:
 
         self._log.info(f"Request: model={self.model} temp={temp} max_tokens={tokens} prompt_len={len(prompt)}")
 
-        start = datetime.now()
-        try:
-            payload = {
-                "model": self.model,
-                "messages": messages,
-                "temperature": temp,
-                "max_tokens": tokens,
-            }
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            }
-            resp = requests.post(self.base_url, headers=headers, json=payload, timeout=120)
-            resp.raise_for_status()
-            data = resp.json()
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temp,
+            "max_tokens": tokens,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
 
-            elapsed = (datetime.now() - start).total_seconds()
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            usage = data.get("usage", {})
-            finish = data.get("choices", [{}])[0].get("finish_reason", "stop")
+        # Retry with exponential backoff for transient failures (timeouts, 5xx)
+        last_error = None
+        for attempt in range(3):
+            try:
+                start = datetime.now()
+                timeout = 120 if attempt == 0 else 180  # longer timeout on retry
+                resp = requests.post(self.base_url, headers=headers, json=payload, timeout=timeout)
+                resp.raise_for_status()
+                data = resp.json()
 
-            self._log.info(
-                f"Response: elapsed={elapsed:.2f}s "
-                f"tokens={usage.get('completion_tokens', 0)} "
-                f"finish={finish}"
-            )
+                elapsed = (datetime.now() - start).total_seconds()
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                usage = data.get("usage", {})
+                finish = data.get("choices", [{}])[0].get("finish_reason", "stop")
 
-            return LLMResponse(
-                content=content,
-                model=data.get("model", self.model),
-                usage={
-                    "prompt_tokens": usage.get("prompt_tokens", 0),
-                    "completion_tokens": usage.get("completion_tokens", 0),
-                },
-                finish_reason=finish,
-            )
+                self._log.info(
+                    f"Response: elapsed={elapsed:.2f}s "
+                    f"tokens={usage.get('completion_tokens', 0)} "
+                    f"finish={finish}"
+                )
 
-        except requests.exceptions.RequestException as e:
-            self._log.error(f"API request failed: {e}")
-            raise RuntimeError(f"LLM API request failed: {e}")
-        except (KeyError, json.JSONDecodeError) as e:
-            self._log.error(f"Response parse error: {e}")
-            raise RuntimeError(f"Failed to parse LLM response: {e}")
+                return LLMResponse(
+                    content=content,
+                    model=data.get("model", self.model),
+                    usage={
+                        "prompt_tokens": usage.get("prompt_tokens", 0),
+                        "completion_tokens": usage.get("completion_tokens", 0),
+                    },
+                    finish_reason=finish,
+                )
+
+            except requests.exceptions.Timeout as e:
+                last_error = e
+                self._log.warning(
+                    f"API timeout (attempt {attempt + 1}/3), "
+                    f"{'retrying in %ds...' % (2 ** attempt * 10) if attempt < 2 else 'giving up.'}"
+                )
+                if attempt < 2:
+                    time.sleep(2 ** attempt * 10)  # 10s, 20s backoff
+            except requests.exceptions.HTTPError as e:
+                resp = e.response if hasattr(e, 'response') else None
+                status = resp.status_code if resp else "?"
+                if status in (429, 502, 503, 504):
+                    last_error = e
+                    self._log.warning(
+                        f"API {status} (attempt {attempt + 1}/3), "
+                        f"{'retrying in %ds...' % (2 ** attempt * 10) if attempt < 2 else 'giving up.'}"
+                    )
+                    if attempt < 2:
+                        time.sleep(2 ** attempt * 10)
+                else:
+                    raise RuntimeError(f"LLM API request failed: {e}")
+            except requests.exceptions.RequestException as e:
+                last_error = e
+                self._log.warning(
+                    f"API request error (attempt {attempt + 1}/3): {e}"
+                )
+                if attempt < 2:
+                    time.sleep(2 ** attempt * 5)  # 5s, 10s for connection errors
+            except (KeyError, json.JSONDecodeError) as e:
+                self._log.error(f"Response parse error: {e}")
+                raise RuntimeError(f"Failed to parse LLM response: {e}")
+
+        self._log.error(f"API request failed after 3 attempts: {last_error}")
+        raise RuntimeError(f"LLM API request failed after 3 retries: {last_error}")
 
     def generate_structured(self, prompt: str, system_prompt: Optional[str] = None) -> Dict[str, Any]:
         response = self.generate(prompt, system_prompt)

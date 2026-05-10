@@ -160,6 +160,15 @@ class Planner:
 
     def create_plan(self, goal: str, context: str = "") -> Plan:
         self._log.info(f"Creating plan for: {goal[:80]}")
+        # Try keyword-based deterministic matching first.
+        # If it returns a specific plan (one with real tool_hint assignments),
+        # use it directly — don't let the LLM override with a wrong plan.
+        fallback = self._fallback_plan(goal)
+        if fallback and fallback.steps and self._is_specific_plan(fallback):
+            self._log.info(f"Keyword-matched plan: {len(fallback.steps)} steps")
+            return fallback
+
+        # Ambiguous intent — let LLM create the plan.
         try:
             plan = self._llm_plan(goal, context)
             if plan and plan.steps:
@@ -167,7 +176,17 @@ class Planner:
                 return plan
         except Exception as e:
             self._log.warning(f"LLM planning failed: {e}, using fallback")
-        return self._fallback_plan(goal)
+        return fallback
+
+    @staticmethod
+    def _is_specific_plan(plan) -> bool:
+        """Return True if the plan has concrete tool assignments (not a generic fallback)."""
+        if not plan or not plan.steps:
+            return False
+        for s in plan.steps:
+            if s.tool_hint and s.tool_hint not in ("", "report", "report_tool"):
+                return True
+        return False
 
     def _llm_plan(self, goal: str, context: str) -> Plan:
         tools_desc = "\n".join(
@@ -182,21 +201,42 @@ class Planner:
 {tools_desc}
 
 根据用户意图选择计划模式:
+
+## 核心复现流程
 - 给仓库URL找对应论文 → 访问仓库页面→提取论文链接→搜索论文→报告
 - 给论文信息找源码 → 搜论文→读论文→找源码→报告
 - 复现论文(完整) → 搜论文→读论文→找源码→克隆→execute_session_tool配置与执行→报告
-- 复现指定项目/仓库（如"复现ML-From-Scratch"、"复现simclr"）→ search_tool搜索仓库URL→clone_tool克隆→execute_session_tool配置与执行→报告
-- 复现<仓库URL>（如"复现 https://github.com/xxx/yyy"）→ clone_tool克隆→execute_session_tool配置与执行→报告
+- 复现指定项目/仓库 → search_tool搜索仓库URL→clone_tool克隆→execute_session_tool配置与执行→报告
+- 复现<仓库URL> → clone_tool克隆→execute_session_tool配置与执行→报告
 - 搜索/查询论文 → 搜论文→读论文→找源码→报告
 - 直接克隆仓库 → 克隆→报告
 
+## 辅助工具（单步完成，无需多步计划）
+- 列出/查看工作区中的仓库 → 单步: list_workspace_tool
+- 列出/查看历史报告 → 单步: list_reports_tool
+- 查看某份具体报告（如"查看报告 report_xxx"） → 单步: view_report_tool
+- 搜索历史报告（如"找一下关于ML-From-Scratch的报告"、"搜索报告xxx"） → 单步: search_reports_tool
+- 删除某份报告 → 单步: delete_report_tool
+- 检查/分析某个仓库状态 → 单步: check_repo_tool
+- 清理工作区/删除仓库/释放空间 → 单步: workspace_cleanup_tool
+- 查看当前配置/设置 → 单步: config_tool
+- 查看系统统计/成功率 → 单步: stats_tool
+- 列出工作区+查看统计 → 两步: list_workspace_tool → stats_tool
+
+**关键判断**: 如果用户目标是「查询/管理已保存的报告」或「查看工作区/仓库状态」或「查看配置/统计」，这些都是辅助查询，用单步对应工具即可。
+
+规划优先级（从高到低）:
+1. 用户明确说"复现"/"reproduce" → 必须用核心复现流程（至少: clone→execute_session_tool→报告）
+2. 用户只要求"配置环境"/"执行"/"跑一下"（已知仓库存在）→ 单步 execute_session_tool
+3. 用户要求"搜索论文"/"找论文" → 搜论文→读论文→找源码→报告
+4. 辅助查询/管理 → 单步对应工具
+
 重要:
-- 每步都需要 tool_hint 指定工具名（search_tool/fetch_tool/source_tool/clone_tool/execute_session_tool/error_handler_tool）
-- 最后一步始终是汇总报告（tool_hint为空字符串）
-- 避免多余步骤，但至少要包含 执行步+报告步 两步
-- 如果目标中已有URL（github.com等），直接使用而不要重新搜索
-- 如果用户给仓库URL要查论文 → fetch_tool访问仓库页面→search_tool搜索论文→汇总报告
-- **任何涉及「配置环境」「安装依赖」「执行/运行项目」的目标，一律用单步 execute_session_tool 完成**。该工具让 LLM 自主创建 venv、安装依赖、诊断 pip 错误（如包名错误 sklearn→scikit-learn、版本冲突、编译器缺失）、运行项目并观察输出。不需要拆成 setup_tool + execute_session_tool 两步
+- 每步都需要 tool_hint 指定工具名
+- 辅助查询工具单步即可，最后不需要汇总报告步骤
+- 核心复现流程最后一步始终是汇总报告（tool_hint为空字符串）
+- "复现"意图必须包含 clone_tool + execute_session_tool，不能缩减为单步
+- 如果目标中已有URL，clone步骤直接使用该URL
 - setup_tool、read_repo_tool、plan_run_tool、run_tool、execute_tool 是旧版工具，已弃用，不要使用
 
 输出 JSON:
@@ -212,23 +252,30 @@ class Planner:
     def _fallback_plan(self, goal: str) -> Plan:
         lower = goal.lower()
 
+        # ------------------------------------------------------------------
+        # Auxiliary tools (simple single-step queries) — detect BEFORE generic
+        # keywords so "找报告" doesn't become a paper search.
+        # ------------------------------------------------------------------
+        aux = self._detect_auxiliary_intent(lower)
+        if aux:
+            tool_name, desc = aux
+            return Plan(goal=goal, steps=[
+                PlanStep(step_id=1, description=desc, tool_hint=tool_name),
+            ])
+
         # Repo URL + paper intent → fetch repo page first, then search paper
         if self._has_repo_url(goal) and self._has_paper_intent(lower):
             return self._create_repo_to_paper_plan(goal)
 
         # Reproduction — distinguish "复现论文" from "复现项目/仓库"
-        # Must come BEFORE plain URL/setup/execute checks so "复现 <URL>"
-        # doesn't get a bare clone plan without execution
         if any(kw in lower for kw in ["复现", "reproduce", "复刻"]):
             if self._has_paper_intent(lower):
-                # Paper reproduction: search paper → fetch → source → clone → execute → report
                 return Plan(goal=goal, steps=[
                     PlanStep(step_id=s.step_id, description=s.description,
                              tool_hint=s.tool_hint, expected_artifact=s.expected_artifact)
                     for s in FULL_REPRODUCTION_PLAN
                 ])
             elif self._has_repo_url(goal):
-                # Repo URL given directly → clone → execute → report (skip search)
                 return Plan(goal=goal, steps=[
                     PlanStep(step_id=1, description="克隆源码仓库到本地工作区",
                              tool_hint="clone_tool"),
@@ -238,7 +285,6 @@ class Planner:
                              tool_hint=""),
                 ])
             else:
-                # Repo name given → search repo → clone → execute → report
                 return Plan(goal=goal, steps=[
                     PlanStep(step_id=s.step_id, description=s.description,
                              tool_hint=s.tool_hint, expected_artifact=s.expected_artifact)
@@ -270,9 +316,15 @@ class Planner:
                 for s in EXECUTE_ONLY_PLAN
             ])
 
-        # Search / query
-        if any(kw in lower for kw in ["搜索", "search", "查询", "query",
-                                       "找", "论文", "paper", "克隆", "clone"]):
+        # Search / query — only match when it's NOT about reports (aux tools handle reports)
+        if any(kw in lower for kw in ["搜索论文", "search paper", "查询论文",
+                                       "找论文", "paper", "arxiv"]):
+            return Plan(goal=goal, steps=[
+                PlanStep(step_id=s.step_id, description=s.description,
+                         tool_hint=s.tool_hint, expected_artifact=s.expected_artifact)
+                for s in REPRODUCTION_PLAN
+            ])
+        if any(kw in lower for kw in ["克隆", "clone"]):
             return Plan(goal=goal, steps=[
                 PlanStep(step_id=s.step_id, description=s.description,
                          tool_hint=s.tool_hint, expected_artifact=s.expected_artifact)
@@ -336,6 +388,134 @@ class Planner:
         return any(kw in lower for kw in [
             "论文", "paper", "原文", "文章", "arxiv", "文献", "doi",
         ])
+
+    @staticmethod
+    def _detect_auxiliary_intent(lower: str) -> tuple:
+        """Detect auxiliary/simple-query intents. Returns (tool_name, description) or None."""
+        import re
+
+        # --- Report management ---
+        # "搜索报告" / "找一下关于X的报告" / "search report"
+        if any(kw in lower for kw in ["搜索报告", "查找报告", "搜报告",
+                                       "search report", "find report"]) \
+                or re.search(r'找.*报告|关于.*报告|搜.*报告', lower):
+            # Try to extract a search query from the goal
+            query_match = re.search(
+                r'(?:关于|about|搜索|查找|搜|找).{0,5}?[报告|report].{0,3}?[：:\s]*([^\s，,。.]{2,40})',
+                lower
+            )
+            if not query_match:
+                # Also try: "找一下 X 的报告" / "关于 X 的报告"
+                query_match = re.search(
+                    r'(?:关于|about)\s*([^\s，,。.]{2,40})',
+                    lower
+                )
+            if query_match:
+                query = query_match.group(1).strip()
+                return ("search_reports_tool", f"搜索历史报告中与 '{query}' 相关的记录")
+            return ("list_reports_tool", "列出所有已保存的历史报告")
+
+        # "列出报告" / "有哪些报告" / "报告列表"
+        if any(phrase in lower for phrase in [
+            "列出报告", "报告列表", "有哪些报告", "查看报告列表",
+            "历史报告", "已保存的报告", "所有报告",
+            "list report", "view reports", "all reports",
+        ]):
+            return ("list_reports_tool", "列出所有已保存的历史报告")
+
+        # "查看报告 <id>" / "查看某份报告" / "查看 X 报告"
+        # Strategy: first try to find a report_ ID anywhere in the message.
+        # If found, route to view_report_tool for the full report content.
+        id_match = re.search(r'(report_\w+)', lower)
+        if id_match and any(kw in lower for kw in ["查看", "view", "打开", "看", "显示"]):
+            rid = id_match.group(1)
+            return ("view_report_tool", f"查看报告 {rid} 的完整内容")
+
+        # Match "查看<name>报告" / "查看<name>的报告" — search by goal name
+        view_match = re.search(
+            r'(?:查看|view|打开|看|显示)\s*([^\s，,。]{2,40})\s*(?:的|的)?报告',
+            lower
+        )
+        if view_match:
+            name = view_match.group(1).strip()
+            # Strip trailing noise: 的, 详细, 完整, 最新
+            name = re.sub(r'[的之](?:详细|完整|全部|最新|最近)?$', '', name)
+            # Filter out noise words that aren't real report names
+            if name and name not in ("一下", "一个", "这个", "那个", "全部", "所有",
+                                      "历史", "完整", "最新", "最近"):
+                # If the cleaned name looks like a report ID, view directly
+                if re.match(r'^report_\w+', name):
+                    return ("view_report_tool", f"查看报告 {name} 的完整内容")
+                return ("search_reports_tool", f"搜索与 '{name}' 相关的历史报告")
+
+        # "删除报告 <id>"
+        if any(kw in lower for kw in ["删除报告", "删掉报告", "delete report"]):
+            id_match = re.search(r'(report_\w+)', lower)
+            if id_match:
+                rid = id_match.group(1)
+                return ("delete_report_tool", f"删除报告 {rid}")
+            return ("list_reports_tool", "列出报告以便选择要删除的报告")
+
+        # --- Workspace management ---
+        # "列出工作区" / "查看工作区" / "工作区里有什么"
+        if any(phrase in lower for phrase in [
+            "列出工作区", "查看工作区", "工作区里有什么", "工作区有什么",
+            "有哪些仓库", "仓库列表", "列出仓库", "查看仓库列表",
+            "list workspace", "view workspace", "what's in workspace",
+        ]):
+            return ("list_workspace_tool", "列出工作区中所有已克隆的仓库及状态")
+
+        # "检查仓库" / "查看仓库状态" / "分析仓库"
+        if any(kw in lower for kw in [
+            "检查仓库", "查看仓库", "分析仓库", "仓库状态",
+            "仓库详情", "仓库信息",
+            "check repo", "inspect repo", "repo status", "repo info",
+        ]):
+            # Try to extract repo name
+            name_match = re.search(
+                r'(?:仓库|repo|检查|查看|分析|状态)\s*[：:]*\s*([a-zA-Z0-9_.-]{2,40})',
+                lower
+            )
+            if name_match:
+                name = name_match.group(1)
+                return ("check_repo_tool", f"深度检查仓库 {name} 的状态")
+            return ("check_repo_tool", "检查工作区中唯一仓库的状态")
+
+        # "清理工作区" / "删除仓库" / "释放空间"
+        if any(kw in lower for kw in [
+            "清理工作区", "删除仓库", "释放空间", "清空工作区",
+            "clean workspace", "cleanup", "remove repo", "free space",
+        ]):
+            # Try to extract repo name
+            name_match = re.search(
+                r'(?:仓库|repo|删除|remove)\s*[：:]*\s*([a-zA-Z0-9_.-]{2,40})',
+                lower
+            )
+            if name_match:
+                name = name_match.group(1)
+                return ("workspace_cleanup_tool", f"从工作区删除仓库 {name}")
+            return ("workspace_cleanup_tool", "查看工作区仓库及磁盘占用，选择清理目标")
+
+        # --- System info ---
+        # "查看配置" / "系统配置" / "当前设置"
+        if any(phrase in lower for phrase in [
+            "查看配置", "系统配置", "当前配置", "当前设置",
+            "什么配置", "配置是什么", "用的什么模型",
+            "view config", "show config", "current config",
+            "settings", "configuration",
+        ]):
+            return ("config_tool", "查看当前Agent系统的全部配置")
+
+        # "查看统计" / "系统状态" / "成功率" / "统计数据"
+        if any(phrase in lower for phrase in [
+            "查看统计", "统计信息", "系统统计", "统计数据",
+            "成功率", "系统状态", "运行统计",
+            "view stats", "show stats", "statistics",
+            "dashboard", "系统概览",
+        ]):
+            return ("stats_tool", "查看Agent系统统计数据（报告数、成功率、常见错误等）")
+
+        return None
 
     def _create_repo_to_paper_plan(self, goal: str) -> Plan:
         """User gave a repo URL and wants to find the associated paper."""
