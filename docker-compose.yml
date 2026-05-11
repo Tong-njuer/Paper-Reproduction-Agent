@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: repro_agent
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - ZHIPU_API_KEY=${ZHIPU_API_KEY:-}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_PROVIDER=${LLM_PROVIDER:-deepseek}
+      - LLM_MODEL=${LLM_MODEL:-deepseek-v4-pro}
+      - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-65536}
+      - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.7}
+      - AGENT_MAX_STEPS=${AGENT_MAX_STEPS:-10}
+      - AGENT_MAX_RETRIES=${AGENT_MAX_RETRIES:-3}
+      - AGENT_REPLAN_THRESHOLD=${AGENT_REPLAN_THRESHOLD:-3}
+      - AGENT_ENABLE_REFLECTION=${AGENT_ENABLE_REFLECTION:-true}
+      - AGENT_ENABLE_MEMORY=${AGENT_ENABLE_MEMORY:-true}
+      - PIP_INDEX_URL=${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+      - WORKSPACE_DIR=${WORKSPACE_DIR:-./workspace}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_DIR=${LOG_DIR:-./logs}
+      - LOG_RETENTION=${LOG_RETENTION:-7 days}
+    volumes:
+      - ./logs:/app/logs
+      - ./data/memory:/app/data/memory
+      - ./data/reports:/app/data/reports
+      - ./workspace:/app/workspace
+    stdin_open: true
+    tty: true

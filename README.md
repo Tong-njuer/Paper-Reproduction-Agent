@@ -1,92 +1,428 @@
-# Agent应用项目
+# 📘 Autonomous Agent Core 设计说明书（无 Tool 部分）
 
+---
 
+# 一、设计目标（Design Goals）
 
-## Getting started
+本系统旨在构建一个**通用的自治 Agent Core**，具备以下能力：
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+### 🎯 核心目标
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+1. **自主规划能力（Planning）**
 
-## Add your files
+   * 能将复杂目标拆解为子任务
+   * 支持动态重规划（replanning）
 
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/ee/gitlab-basics/add-file.html#add-a-file-using-the-command-line) or push an existing Git repository with the following command:
+2. **交互式决策能力（ReAct）**
 
+   * 基于环境反馈持续决策
+   * 支持多步推理与行动循环
+
+3. **自我修正能力（Reflexion）**
+
+   * 能分析失败原因
+   * 能调整策略并避免重复错误
+
+4. **状态感知与记忆能力（Memory）**
+
+   * 跟踪历史行为与结果
+   * 支持长期策略优化
+
+---
+
+# 二、总体架构（Architecture Overview）
+
+```id="agent_arch"
+                ┌──────────────┐
+                │    Goal      │
+                └──────┬───────┘
+                       ↓
+                ┌──────────────┐
+                │   Planner    │
+                └──────┬───────┘
+                       ↓
+                ┌──────────────┐
+                │   ReAct Loop │
+                └──────┬───────┘
+                       ↓
+                ┌──────────────┐
+                │ Observation  │
+                └──────┬───────┘
+                       ↓
+                ┌──────────────┐
+                │  Reflexion   │
+                └──────┬───────┘
+                       ↓
+                ┌──────────────┐
+                │   Memory     │
+                └──────────────┘
 ```
-cd existing_repo
-git remote add origin http://172.29.4.49/2026seiii-101-sudomakemeateam/agent.git
-git branch -M master
-git push -uf origin master
+
+---
+
+# 三、核心模块设计（Core Components）
+
+---
+
+# 3.1 Planner（规划模块）
+
+## 📌 职责
+
+* 将高层目标拆解为可执行子任务
+* 根据执行反馈动态调整计划
+
+---
+
+## 📥 输入
+
+* `goal`：用户目标
+* `context`：当前状态（历史、错误、进度）
+
+---
+
+## 📤 输出
+
+```json
+[
+  {"step_id": 1, "description": "安装依赖"},
+  {"step_id": 2, "description": "运行训练脚本"}
+]
 ```
 
-## Integrate with your tools
+---
 
-- [ ] [Set up project integrations](http://172.29.4.49/2026seiii-101-sudomakemeateam/agent/-/settings/integrations)
+## 🧠 设计要点
 
-## Collaborate with your team
+### ✅ 支持动态规划
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Automatically merge when pipeline succeeds](https://docs.gitlab.com/ee/user/project/merge_requests/merge_when_pipeline_succeeds.html)
+* 允许根据失败进行replan
 
-## Test and Deploy
+### ✅ 不绑定具体工具
 
-Use the built-in continuous integration in GitLab.
+* 只描述“做什么”，不描述“怎么做”
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/index.html)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing(SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+---
 
-***
+## 🔄 Replanning触发条件
 
-# Editing this README
+* 连续失败
+* 环境变化
+* 新信息出现
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thank you to [makeareadme.com](https://www.makeareadme.com/) for this template.
+---
 
-## Suggestions for a good README
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+# 3.2 ReAct Engine（行动决策模块）
 
-## Name
-Choose a self-explaining name for your project.
+## 📌 职责
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+* 在每一步决定“下一步行动”
+* 基于Observation进行推理
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+---
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+## 🔁 工作模式（核心循环）
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+```id="react_loop"
+Thought → Action → Observation → Thought → ...
+```
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+---
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+## 📥 输入
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+* 当前计划
+* 历史行为
+* 最新Observation
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+---
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+## 📤 输出
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+```json
+{
+  "thought": "需要先运行代码测试环境",
+  "action": "run_code",
+  "args": {
+    "command": "python train.py"
+  }
+}
+```
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+---
 
-## License
-For open source projects, say how it is licensed.
+## 🧠 设计要点
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+### ✅ 局部决策（step-level reasoning）
+
+* 不依赖全局计划精确性
+
+### ✅ 支持探索（exploration）
+
+* 可以尝试不同路径
+
+---
+
+# 3.3 Reflexion（自我反思模块）
+
+## 📌 职责（最关键模块🔥）
+
+* 分析失败原因
+* 提供修复策略
+* 更新Agent行为
+
+---
+
+## 📥 输入
+
+* Observation（尤其是错误）
+* 当前策略
+
+---
+
+## 📤 输出
+
+```json
+{
+  "analysis": "缺少依赖numpy",
+  "fix_action": {
+    "action": "install_package",
+    "args": {"package": "numpy"}
+  },
+  "lesson": "运行前应检查依赖"
+}
+```
+
+---
+
+## 🧠 设计要点
+
+### ✅ 结构化错误理解
+
+* 使用error schema（type/subtype）
+
+### ✅ 可学习性
+
+* 将经验写入Memory
+
+---
+
+## 🔥 Reflexion的三层能力
+
+| 层级 | 能力             |
+| ---- | ---------------- |
+| L1   | 错误解释         |
+| L2   | 修复建议         |
+| L3   | 策略优化（长期） |
+
+---
+
+# 3.4 Memory（记忆模块）
+
+## 📌 职责
+
+* 存储历史行为与结果
+* 支持策略改进
+
+---
+
+## 🧠 Memory类型
+
+### 1️⃣ Short-term Memory
+
+```json
+{
+  "last_action": "...",
+  "last_error": "..."
+}
+```
+
+---
+
+### 2️⃣ Long-term Memory
+
+```json
+{
+  "common_errors": [
+    {"error": "missing numpy", "fix": "pip install numpy"}
+  ]
+}
+```
+
+---
+
+## 📌 作用
+
+* 避免重复错误
+* 提高效率
+
+---
+
+# 3.5 State Manager（状态管理）
+
+## 📌 职责
+
+* 管理Agent当前状态
+* 支持可视化
+
+---
+
+## 📊 状态示例
+
+```json
+{
+  "step": 3,
+  "plan_progress": "running experiment",
+  "last_action": "...",
+  "status": "error"
+}
+```
+
+---
+
+# 四、Agent运行流程（Execution Flow）
+
+---
+
+## 🔁 主循环
+
+```id="main_loop"
+while not done:
+
+    1. Planner → 生成/更新计划
+    
+    2. ReAct → 决定行动
+    
+    3. 执行（Tool Layer）
+    
+    4. 获取Observation
+    
+    5. 若失败 → Reflexion
+    
+    6. 更新Memory
+    
+    7. 判断是否终止
+```
+
+---
+
+## 📌 终止条件
+
+* 任务成功
+* 达到最大步数
+* 多次失败无法修复
+
+---
+
+# 五、模块协同机制（Coordination）
+
+---
+
+## 🔗 Planner 与 ReAct
+
+* Planner提供方向
+* ReAct做局部决策
+
+---
+
+## 🔗 ReAct 与 Reflexion
+
+* ReAct负责执行
+* Reflexion负责纠错
+
+---
+
+## 🔗 Reflexion 与 Memory
+
+* Reflexion生成经验
+* Memory存储经验
+
+---
+
+# 六、关键设计原则（Key Principles）
+
+---
+
+## ✅ 1. 解耦（Decoupling）
+
+* Agent Core 不依赖具体工具
+
+---
+
+## ✅ 2. 结构化（Structured Output）
+
+* 所有模块输出JSON格式
+
+---
+
+## ✅ 3. 可解释性（Interpretability）
+
+* 每一步都有 thought / action / reflection
+
+---
+
+## ✅ 4. 可扩展性（Extensibility）
+
+* 可添加新模块（如多Agent）
+
+---
+
+## ✅ 5. 试错驱动（Trial-and-Error Driven）
+
+* 系统通过失败不断优化
+
+---
+
+# 七、可视化设计（Visualization）
+
+---
+
+## CLI示例
+
+```id="cli_demo"
+[Step 3]
+Thought: 尝试运行代码
+Action: python train.py
+Observation: ERROR missing numpy
+
+[Reflection]
+→ 安装numpy
+
+[Next Action]
+pip install numpy
+```
+
+---
+
+## Web可视化（推荐）
+
+* 状态流图（Graph）
+* 行为日志
+* 错误演化过程
+
+---
+
+# 八、扩展能力（Advanced Features）
+
+---
+
+## ⭐ 1. 多策略探索
+
+* 同一问题尝试多种方案
+
+---
+
+## ⭐ 2. 自适应规划
+
+* Planner基于历史优化
+
+---
+
+## ⭐ 3. 元学习（Meta-learning）
+
+* 优化自身prompt或策略
+
+---
+
+# 九、总结（可直接写报告）
+
+> 本Agent Core通过集成Planner、ReAct与Reflexion三大核心模块，实现了从目标分解、动态决策到错误驱动优化的完整闭环。系统采用结构化接口与模块解耦设计，使其具备良好的扩展性与跨任务适应能力。

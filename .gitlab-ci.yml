@@ -1,7 +1,11 @@
 stages:
-  - test
+  - build
 
-test-job:
-  stage: test
+build:
+  stage: build
   script:
-    - echo "Hello!"
+    - docker-compose down --remove-orphans
+    - docker-compose build --no-cache
+    - docker-compose push
+    - docker-compose up -d --force-recreate
+    - docker image prune -f
