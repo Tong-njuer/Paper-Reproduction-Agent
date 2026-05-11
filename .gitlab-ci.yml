@@ -1,5 +1,10 @@
 stages:
+  - before_script
   - build
+
+before_script:
+  - echo "LLM_PROVIDER=$LLM_PROVIDER" >> .env
+  - echo "LLM_API_KEY=$LLM_API_KEY" >> .env
 
 build:
   stage: build
