@@ -1,10 +1,10 @@
 stages:
-  - before_script
   - build
 
 before_script:
-  - echo "LLM_PROVIDER=$LLM_PROVIDER" >> .env
-  - echo "LLM_API_KEY=$LLM_API_KEY" >> .env
+  - powershell -Command "Set-Content .env '' -Encoding utf8"
+  - powershell -Command "Add-Content .env 'LLM_PROVIDER=$env:LLM_PROVIDER' -Encoding utf8"
+  - powershell -Command "Add-Content .env 'LLM_API_KEY=$env:LLM_API_KEY' -Encoding utf8"
 
 build:
   stage: build
