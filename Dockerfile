@@ -1,4 +1,5 @@
-FROM ubuntu:22.04
+# 使用 Docker 官方中国区加速源或国内可用代理源
+FROM m.daocloud.io/docker.io/ubuntu:22.04
 
 LABEL maintainer="SEIII Agent Team"
 LABEL description="Paper Reproduction Agent — Chainlit Frontend"
