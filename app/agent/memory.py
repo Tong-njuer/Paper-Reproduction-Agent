@@ -67,8 +67,47 @@ class Memory:
         self.max_short = short_term_max
         self.long_term: List[LongTermEntry] = []
         self.memory_dir = Path(memory_dir)
+        # Multi-turn conversation history: past agent run results
+        self.conversation_history: List[dict] = []
+        self.max_history: int = 10
         if self.enabled:
             self._load_long_term()
+            self._load_conversation_history()
+
+    def remember_run(self, result: dict):
+        """Store a completed agent run for multi-turn context."""
+        if not self.enabled:
+            return
+        self.conversation_history.append({
+            "goal": result.get("goal", "")[:100],
+            "success": result.get("success", False),
+            "summary": result.get("summary", "")[:500],
+            "source_url": result.get("source_url", ""),
+            "error_count": len(result.get("errors", [])),
+            "timestamp": datetime.now().isoformat(),
+        })
+        if len(self.conversation_history) > self.max_history:
+            self.conversation_history = self.conversation_history[-self.max_history:]
+        self._save_conversation_history()
+
+    def _save_conversation_history(self):
+        path = self.memory_dir / "conversation_history.json"
+        try:
+            self.memory_dir.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(self.conversation_history, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            self._log.warning(f"Failed to save conversation history: {e}")
+
+    def _load_conversation_history(self):
+        path = self.memory_dir / "conversation_history.json"
+        if path.exists():
+            try:
+                self.conversation_history = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as e:
+                self._log.warning(f"Failed to load conversation history: {e}")
 
     def add_step(self, record: StepRecord):
         if not self.enabled:
@@ -114,6 +153,7 @@ class Memory:
 
     def context_for_prompt(self) -> str:
         parts = []
+        # Recent execution steps
         if self.short_term:
             recent = self.short_term[-5:]
             parts.append("## 近期执行记录")
@@ -122,6 +162,16 @@ class Memory:
                     f"- [{r.step_id}] {r.description}: {r.status}"
                     + (f" | 错误: {r.error}" if r.error else "")
                 )
+        # Conversation history (previous runs)
+        if self.conversation_history:
+            parts.append("\n## 对话历史（之前的复现任务）")
+            for i, run in enumerate(reversed(self.conversation_history[-3:]), 1):
+                parts.append(
+                    f"- 第{i}次: {run['goal']} "
+                    f"({'✅成功' if run['success'] else '❌失败'})"
+                    f" | {run.get('source_url', '')}"
+                )
+        # Long-term learned patterns
         if self.long_term:
             parts.append("\n## 历史经验")
             for e in self.long_term[-5:]:
@@ -129,7 +179,11 @@ class Memory:
         return "\n".join(parts)
 
     def summary(self) -> dict:
-        return {"short_term_count": len(self.short_term), "long_term_count": len(self.long_term)}
+        return {
+            "short_term_count": len(self.short_term),
+            "long_term_count": len(self.long_term),
+            "conversation_count": len(self.conversation_history),
+        }
 
     def _load_long_term(self):
         path = self.memory_dir / "long_term_memory.json"

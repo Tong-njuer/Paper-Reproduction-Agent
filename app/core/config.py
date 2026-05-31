@@ -42,15 +42,17 @@ class Config(BaseModel):
         provider = os.getenv("LLM_PROVIDER", "zhipu").lower()
 
         # Resolve API key: provider-specific → generic → error
-        api_key = (
-            os.getenv("DEEPSEEK_API_KEY") or
-            os.getenv("ZHIPU_API_KEY") or
-            os.getenv("LLM_API_KEY")
-        )
+        if provider == "deepseek":
+            api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("LLM_API_KEY")
+        elif provider == "zhipu":
+            api_key = os.getenv("ZHIPU_API_KEY") or os.getenv("LLM_API_KEY")
+        else:
+            api_key = os.getenv("LLM_API_KEY")
+            
         if not api_key:
             raise RuntimeError(
-                "No API key found. Set DEEPSEEK_API_KEY, ZHIPU_API_KEY, or "
-                "LLM_API_KEY in .env file."
+                f"No API key found for provider '{provider}'. "
+                f"Set {provider.upper()}_API_KEY or LLM_API_KEY in .env file."
             )
 
         # Default model & base_url per provider

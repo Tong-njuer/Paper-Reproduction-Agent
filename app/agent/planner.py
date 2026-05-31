@@ -1,7 +1,10 @@
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 
+from app.core.config import get_config
 from app.core.llm import get_llm
 from app.core.logging import get_logger
+from app.agent.intent_classifier import IntentType, get_classifier
 from app.tools import list_available_tools
 
 
@@ -97,6 +100,7 @@ class Plan:
         }
 
 
+# ── 保留 4 步 REPRODUCTION_PLAN 用于纯搜索回退 ──
 REPRODUCTION_PLAN = [
     PlanStep(step_id=1, description="搜索论文，获取论文标题、作者、摘要和链接",
              tool_hint="search_tool"),
@@ -108,7 +112,40 @@ REPRODUCTION_PLAN = [
              tool_hint=""),
 ]
 
-FULL_REPRODUCTION_PLAN = [
+EXECUTE_ONLY_PLAN = [
+    PlanStep(step_id=1, description="对话式配置与执行：LLM创建venv、安装依赖、运行项目，观察输出、诊断错误、修复问题，直到成功或确认无法运行",
+             tool_hint="execute_session_tool"),
+    PlanStep(step_id=2, description="汇总报告：执行结果与项目信息",
+             tool_hint=""),
+]
+
+# ──────────────────────────────────────────────────────────────────
+# New plan templates with intent classification & env reconnaissance
+# ──────────────────────────────────────────────────────────────────
+
+SESSION_FOLLOWUP_PLAN = [
+    PlanStep(step_id=1, description="环境侦察：检测项目所需的 Python 版本，确保虚拟环境已配置",
+             tool_hint="python_env_tool"),
+    PlanStep(step_id=2, description="对话式执行：基于现有仓库继续执行，观察输出、诊断错误、修复问题，直到成功或确认无法运行",
+             tool_hint="execute_session_tool"),
+    PlanStep(step_id=3, description="汇总报告：执行结果与项目信息",
+             tool_hint=""),
+]
+
+ENGINEERING_TEST_PLAN = [
+    PlanStep(step_id=1, description="搜索目标仓库，获取GitHub仓库URL与基本信息",
+             tool_hint="search_tool"),
+    PlanStep(step_id=2, description="克隆源码仓库到本地工作区",
+             tool_hint="clone_tool"),
+    PlanStep(step_id=3, description="环境侦察：检测项目所需的 Python 版本，配置虚拟环境",
+             tool_hint="python_env_tool"),
+    PlanStep(step_id=4, description="对话式配置与执行：LLM创建venv、安装依赖、运行项目，观察输出、诊断错误、修复问题，直到成功或确认无法运行",
+             tool_hint="execute_session_tool"),
+    PlanStep(step_id=5, description="汇总报告：项目信息、源码地址、本地路径、环境配置与执行结果",
+             tool_hint=""),
+]
+
+FULL_REPRODUCTION_PLAN_V2 = [
     PlanStep(step_id=1, description="搜索论文，获取论文标题、作者、摘要和链接",
              tool_hint="search_tool"),
     PlanStep(step_id=2, description="获取并阅读论文全文内容，提取关键信息（方法、实验、代码链接）",
@@ -117,34 +154,24 @@ FULL_REPRODUCTION_PLAN = [
              tool_hint="source_tool"),
     PlanStep(step_id=4, description="克隆源码仓库到本地工作区",
              tool_hint="clone_tool"),
-    PlanStep(step_id=5, description="对话式配置与执行：LLM创建venv、安装依赖、运行项目，观察输出、诊断错误、修复问题，直到成功或确认无法运行",
+    PlanStep(step_id=5, description="环境侦察：检测项目所需的 Python 版本，配置虚拟环境",
+             tool_hint="python_env_tool"),
+    PlanStep(step_id=6, description="对话式配置与执行：LLM创建venv、安装依赖、运行项目，观察输出、诊断错误、修复问题，直到成功或确认无法运行",
              tool_hint="execute_session_tool"),
-    PlanStep(step_id=6, description="汇总报告：论文信息、源码地址、本地路径、环境配置与执行结果",
+    PlanStep(step_id=7, description="汇总报告：论文信息、源码地址、本地路径、环境配置与执行结果",
              tool_hint=""),
 ]
 
-SETUP_ONLY_PLAN = [
-    PlanStep(step_id=1, description="对话式配置与执行：LLM创建venv、安装依赖、运行项目，观察输出、诊断错误、修复问题，直到成功或确认无法运行",
-             tool_hint="execute_session_tool"),
-    PlanStep(step_id=2, description="汇总报告：环境配置结果与执行结果",
-             tool_hint=""),
-]
-
-EXECUTE_ONLY_PLAN = [
-    PlanStep(step_id=1, description="对话式配置与执行：LLM创建venv、安装依赖、运行项目，观察输出、诊断错误、修复问题，直到成功或确认无法运行",
-             tool_hint="execute_session_tool"),
-    PlanStep(step_id=2, description="汇总报告：执行结果与项目信息",
-             tool_hint=""),
-]
-
-REPO_REPRODUCTION_PLAN = [
+REPO_REPRODUCTION_PLAN_V2 = [
     PlanStep(step_id=1, description="搜索目标仓库，获取GitHub仓库URL与基本信息",
              tool_hint="search_tool"),
     PlanStep(step_id=2, description="克隆源码仓库到本地工作区",
              tool_hint="clone_tool"),
-    PlanStep(step_id=3, description="对话式配置与执行：LLM创建venv、安装依赖、运行项目，观察输出、诊断错误、修复问题，直到成功或确认无法运行",
+    PlanStep(step_id=3, description="环境侦察：检测项目所需的 Python 版本，配置虚拟环境",
+             tool_hint="python_env_tool"),
+    PlanStep(step_id=4, description="对话式配置与执行：LLM创建venv、安装依赖、运行项目，观察输出、诊断错误、修复问题，直到成功或确认无法运行",
              tool_hint="execute_session_tool"),
-    PlanStep(step_id=4, description="汇总报告：项目信息、源码地址、本地路径、环境配置与执行结果",
+    PlanStep(step_id=5, description="汇总报告：项目信息、源码地址、本地路径、环境配置与执行结果",
              tool_hint=""),
 ]
 
@@ -153,22 +180,47 @@ class Planner:
     def __init__(self):
         self._llm = get_llm()
         self._log = get_logger("planner")
+        self._classifier = get_classifier()
 
     # ------------------------------------------------------------------
-    # Primary: LLM-driven planning
+    # Primary: Intent classification → LLM-driven planning
     # ------------------------------------------------------------------
 
     def create_plan(self, goal: str, context: str = "") -> Plan:
         self._log.info(f"Creating plan for: {goal[:80]}")
-        # Try keyword-based deterministic matching first.
-        # If it returns a specific plan (one with real tool_hint assignments),
-        # use it directly — don't let the LLM override with a wrong plan.
+
+        # ── Phase 1: Intent classification (returns intent + requires_agent) ──
+        intent, requires_agent = self._classifier.classify(goal, context)
+        self._log.info(f"Intent classified as: {intent.value} (agent={requires_agent})")
+
+        # ── Phase 2: Route based on intent ──
+        if not requires_agent:
+            # LLM said no agent needed — fall through to keyword fallback
+            # (which may still find a match for specific commands like "查看工作区")
+            pass
+
+        if intent == IntentType.REPRODUCTION:
+            plan = self._build_reproduction_plan(goal)
+            if plan:
+                return plan
+
+        elif intent == IntentType.ENGINEERING_TEST:
+            plan = self._build_engineering_plan(goal)
+            if plan:
+                return plan
+
+        elif intent == IntentType.SESSION_FOLLOWUP:
+            plan = self._build_followup_plan(goal)
+            if plan:
+                return plan
+
+        # ── Phase 3: Fallback to keyword-based matching ──
         fallback = self._fallback_plan(goal)
         if fallback and fallback.steps and self._is_specific_plan(fallback):
             self._log.info(f"Keyword-matched plan: {len(fallback.steps)} steps")
             return fallback
 
-        # Ambiguous intent — let LLM create the plan.
+        # ── Phase 4: LLM-driven planning for ambiguous intents ──
         try:
             plan = self._llm_plan(goal, context)
             if plan and plan.steps:
@@ -177,6 +229,87 @@ class Planner:
         except Exception as e:
             self._log.warning(f"LLM planning failed: {e}, using fallback")
         return fallback
+
+    # ------------------------------------------------------------------
+    # Intent-based plan builders
+    # ------------------------------------------------------------------
+
+    def _build_reproduction_plan(self, goal: str) -> Optional[Plan]:
+        """Build a plan for academic paper reproduction."""
+        if self._has_repo_url(goal):
+            # User provided a repo URL directly → skip paper search
+            return Plan(goal=goal, steps=[
+                PlanStep(step_id=1, description="克隆源码仓库到本地工作区",
+                         tool_hint="clone_tool"),
+                PlanStep(step_id=2, description="环境侦察：检测项目所需的 Python 版本，配置虚拟环境",
+                         tool_hint="python_env_tool"),
+                PlanStep(step_id=3, description="对话式配置与执行：LLM创建venv、安装依赖、运行项目",
+                         tool_hint="execute_session_tool"),
+                PlanStep(step_id=4, description="汇总报告：项目信息、源码地址、环境配置与执行结果",
+                         tool_hint=""),
+            ])
+        # Full paper pipeline
+        return Plan(goal=goal, steps=[
+            PlanStep(step_id=s.step_id, description=s.description,
+                     tool_hint=s.tool_hint)
+            for s in FULL_REPRODUCTION_PLAN_V2
+        ])
+
+    def _build_engineering_plan(self, goal: str) -> Optional[Plan]:
+        """Build a plan for engineering project testing (skip paper search)."""
+        self._log.info("Engineering test: skipping paper search phase")
+        if self._has_repo_url(goal):
+            return Plan(goal=goal, steps=[
+                PlanStep(step_id=1, description="克隆源码仓库到本地工作区",
+                         tool_hint="clone_tool"),
+                PlanStep(step_id=2, description="环境侦察：检测项目所需的 Python 版本，配置虚拟环境",
+                         tool_hint="python_env_tool"),
+                PlanStep(step_id=3, description="对话式配置与执行：LLM创建venv、安装依赖、运行项目",
+                         tool_hint="execute_session_tool"),
+                PlanStep(step_id=4, description="汇总报告：项目信息、源码地址、环境配置与执行结果",
+                         tool_hint=""),
+            ])
+        return Plan(goal=goal, steps=[
+            PlanStep(step_id=s.step_id, description=s.description,
+                     tool_hint=s.tool_hint)
+            for s in ENGINEERING_TEST_PLAN
+        ])
+
+    def _build_followup_plan(self, goal: str) -> Optional[Plan]:
+        """Build a minimal plan for session follow-up (existing repo)."""
+        self._log.info("Session follow-up: building minimal plan")
+        repo_name = self._detect_existing_repo_name()
+        if repo_name:
+            return Plan(goal=goal, steps=[
+                PlanStep(step_id=1,
+                         description=f"环境侦察：检测项目所需的 Python 版本，确保虚拟环境已配置",
+                         tool_hint="python_env_tool"),
+                PlanStep(step_id=2,
+                         description=f"对话式执行：在仓库 {repo_name} 中继续执行，观察输出、诊断错误、修复问题",
+                         tool_hint="execute_session_tool"),
+                PlanStep(step_id=3, description="汇总报告：执行结果与项目信息",
+                         tool_hint=""),
+            ])
+        return Plan(goal=goal, steps=[
+            PlanStep(step_id=1, description="对话式执行：观察输出、诊断错误、修复问题，直到成功或确认无法运行",
+                     tool_hint="execute_session_tool"),
+            PlanStep(step_id=2, description="汇总报告：执行结果与项目信息",
+                     tool_hint=""),
+        ])
+
+    @staticmethod
+    def _detect_existing_repo_name() -> str:
+        """Return the name of the first cloned repo in workspace, or empty string."""
+        try:
+            ws = Path(get_config().agent.workspace_dir).resolve()
+            if not ws.exists():
+                return ""
+            for p in ws.iterdir():
+                if p.is_dir() and (p / ".git").exists():
+                    return p.name
+            return ""
+        except Exception:
+            return ""
 
     @staticmethod
     def _is_specific_plan(plan) -> bool:
@@ -205,11 +338,23 @@ class Planner:
 ## 核心复现流程
 - 给仓库URL找对应论文 → 访问仓库页面→提取论文链接→搜索论文→报告
 - 给论文信息找源码 → 搜论文→读论文→找源码→报告
-- 复现论文(完整) → 搜论文→读论文→找源码→克隆→execute_session_tool配置与执行→报告
-- 复现指定项目/仓库 → search_tool搜索仓库URL→clone_tool克隆→execute_session_tool配置与执行→报告
-- 复现<仓库URL> → clone_tool克隆→execute_session_tool配置与执行→报告
+- 复现论文(完整) → 搜论文→读论文→找源码→克隆→python_env_tool环境侦察→execute_session_tool配置与执行→报告
+- 复现指定项目/仓库 → search_tool搜索仓库URL→clone_tool克隆→python_env_tool环境侦察→execute_session_tool配置与执行→报告
+- 复现<仓库URL> → clone_tool克隆→python_env_tool环境侦察→execute_session_tool配置与执行→报告
 - 搜索/查询论文 → 搜论文→读论文→找源码→报告
 - 直接克隆仓库 → 克隆→报告
+- 配置/清理环境 → python_env_tool 或 cleanup_env_tool
+
+## 环境管理工具
+- python_env_tool: 环境侦察（检测项目需要的Python版本）、配置虚拟环境（创建.venv）、清理虚拟环境
+  - action=recon: 侦察项目环境需求
+  - action=setup: 创建/更新虚拟环境
+  - action=cleanup: 删除虚拟环境
+- cleanup_env_tool: 清理复现环境（删除venv、清理pip缓存）
+  - action=remove_venv: 删除指定仓库的虚拟环境
+  - action=clean_all: 删除所有虚拟环境
+  - action=clean_pip_cache: 清理pip缓存
+  - action=status: 查看环境状态
 
 ## 辅助工具（单步完成，无需多步计划）
 - 列出/查看工作区中的仓库 → 单步: list_workspace_tool
@@ -226,8 +371,8 @@ class Planner:
 **关键判断**: 如果用户目标是「查询/管理已保存的报告」或「查看工作区/仓库状态」或「查看配置/统计」，这些都是辅助查询，用单步对应工具即可。
 
 规划优先级（从高到低）:
-1. 用户明确说"复现"/"reproduce" → 必须用核心复现流程（至少: clone→execute_session_tool→报告）
-2. 用户只要求"配置环境"/"执行"/"跑一下"（已知仓库存在）→ 单步 execute_session_tool
+1. 用户明确说"复现"/"reproduce" → 必须用核心复现流程（至少: clone→python_env_tool→execute_session_tool→报告）
+2. 用户只要求"配置环境"/"执行"/"跑一下"（已知仓库存在）→ 单步 execute_session_tool，如果环境未配好则用 python_env_tool
 3. 用户要求"搜索论文"/"找论文" → 搜论文→读论文→找源码→报告
 4. 辅助查询/管理 → 单步对应工具
 
@@ -237,7 +382,8 @@ class Planner:
 - 核心复现流程最后一步始终是汇总报告（tool_hint为空字符串）
 - "复现"意图必须包含 clone_tool + execute_session_tool，不能缩减为单步
 - 如果目标中已有URL，clone步骤直接使用该URL
-- setup_tool、read_repo_tool、plan_run_tool、run_tool、execute_tool 是旧版工具，已弃用，不要使用
+- python_env_tool 必须在 execute_session_tool 之前，确保环境已正确配置
+- 当前可用的工具只有: search_tool, fetch_tool, source_tool, clone_tool, python_env_tool, cleanup_env_tool, execute_session_tool, 以及 list_workspace_tool / check_repo_tool / config_tool / stats_tool 等辅助工具
 
 输出 JSON:
 {{"steps": [{{"step_id": 1, "description": "...", "tool_hint": "search_tool"}}]}}"""
@@ -273,22 +419,24 @@ class Planner:
                 return Plan(goal=goal, steps=[
                     PlanStep(step_id=s.step_id, description=s.description,
                              tool_hint=s.tool_hint, expected_artifact=s.expected_artifact)
-                    for s in FULL_REPRODUCTION_PLAN
+                    for s in FULL_REPRODUCTION_PLAN_V2
                 ])
             elif self._has_repo_url(goal):
                 return Plan(goal=goal, steps=[
                     PlanStep(step_id=1, description="克隆源码仓库到本地工作区",
                              tool_hint="clone_tool"),
-                    PlanStep(step_id=2, description="对话式配置与执行：LLM创建venv、安装依赖、运行项目",
+                    PlanStep(step_id=2, description="环境侦察：检测项目所需的 Python 版本，配置虚拟环境",
+                             tool_hint="python_env_tool"),
+                    PlanStep(step_id=3, description="对话式配置与执行：LLM创建venv、安装依赖、运行项目",
                              tool_hint="execute_session_tool"),
-                    PlanStep(step_id=3, description="汇总报告：项目信息、源码地址、环境配置与执行结果",
+                    PlanStep(step_id=4, description="汇总报告：项目信息、源码地址、环境配置与执行结果",
                              tool_hint=""),
                 ])
             else:
                 return Plan(goal=goal, steps=[
                     PlanStep(step_id=s.step_id, description=s.description,
                              tool_hint=s.tool_hint, expected_artifact=s.expected_artifact)
-                    for s in REPO_REPRODUCTION_PLAN
+                    for s in REPO_REPRODUCTION_PLAN_V2
                 ])
 
         # Repo URL → direct clone
@@ -303,9 +451,12 @@ class Planner:
         # Setup / configure environment (standalone)
         if self._has_setup_intent(lower):
             return Plan(goal=goal, steps=[
-                PlanStep(step_id=s.step_id, description=s.description,
-                         tool_hint=s.tool_hint, expected_artifact=s.expected_artifact)
-                for s in SETUP_ONLY_PLAN
+                PlanStep(step_id=1, description="环境侦察：检测项目所需的 Python 版本，配置虚拟环境",
+                         tool_hint="python_env_tool"),
+                PlanStep(step_id=2, description="对话式配置与执行：LLM创建venv、安装依赖、运行项目，观察输出、诊断错误、修复问题，直到成功或确认无法运行",
+                         tool_hint="execute_session_tool"),
+                PlanStep(step_id=3, description="汇总报告：环境配置结果与执行结果",
+                         tool_hint=""),
             ])
 
         # Execute / run (standalone — workspace already has repo + venv)
@@ -496,6 +647,36 @@ class Planner:
                 return ("workspace_cleanup_tool", f"从工作区删除仓库 {name}")
             return ("workspace_cleanup_tool", "查看工作区仓库及磁盘占用，选择清理目标")
 
+        # --- Environment cleanup ---
+        # "清理环境" / "删除虚拟环境" / "clean venv"
+        if any(kw in lower for kw in [
+            "清理环境", "删除虚拟环境", "清理虚拟环境",
+            "clean venv", "remove venv", "cleanup venv",
+            "清理venv", "删除venv",
+        ]):
+            # Try to extract repo name
+            name_match = re.search(
+                r'(?:仓库|repo|环境|env|venv)\s*[：:]*\s*([a-zA-Z0-9_.-]{2,40})',
+                lower
+            )
+            if name_match:
+                name = name_match.group(1)
+                return ("cleanup_env_tool", f"清理仓库 {name} 的虚拟环境")
+            return ("cleanup_env_tool", "查看工作区环境状态并选择清理目标")
+
+        # "查看环境" / "环境状态" / "env status"
+        if any(kw in lower for kw in [
+            "查看环境", "环境状态", "环境信息",
+            "env status", "venv status", "environment status",
+        ]):
+            return ("cleanup_env_tool", "查看工作区中所有仓库的虚拟环境状态")
+
+        # "清理pip缓存" / "pip cache"
+        if any(kw in lower for kw in [
+            "清理pip", "pip缓存", "pip cache", "清除pip",
+        ]):
+            return ("cleanup_env_tool", "清理 pip 缓存")
+
         # --- System info ---
         # "查看配置" / "系统配置" / "当前设置"
         if any(phrase in lower for phrase in [
@@ -585,6 +766,15 @@ class Planner:
     def _fallback_replan(self, plan: Plan, failed: PlanStep, error: str) -> Plan:
         kept = [s for s in plan.steps if s.status == "done"]
         next_id = len(kept) + 1
+        
+        if failed.description.count("重试:") >= 1 or "Unauthorized" in error or "401" in error:
+            new_steps = [
+                PlanStep(step_id=next_id,
+                         description=f"终止执行：步骤多次重试失败或认证错误。错误: {error[:50]}",
+                         tool_hint="")
+            ]
+            return Plan(goal=plan.goal, steps=kept + new_steps)
+
         new_steps = [
             PlanStep(step_id=next_id,
                      description=f"重试: {failed.description}（使用备选方式）",

@@ -62,7 +62,9 @@ def _build_registry():
     from app.tools.workspace_cleanup_tool import WorkspaceCleanupTool
     from app.tools.config_tool import ConfigTool
     from app.tools.stats_tool import StatsTool
-    from app.tools._interfaces import ReportTool
+    from app.tools.python_env_tool import PythonEnvTool
+    from app.tools.cleanup_env_tool import CleanupEnvTool
+    from app.tools.report_tool import ReportTool
 
     register_tool(SearchTool())
     register_tool(FetchTool())
@@ -85,6 +87,8 @@ def _build_registry():
     register_tool(ConfigTool())
     register_tool(StatsTool())
     register_tool(ReportTool())
+    register_tool(PythonEnvTool())
+    register_tool(CleanupEnvTool())
 
 
 _build_registry()

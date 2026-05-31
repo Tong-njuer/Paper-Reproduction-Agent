@@ -1,7 +1,7 @@
 import json
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional
 
 import requests
 from pydantic import BaseModel
@@ -101,12 +101,14 @@ class LLMInterface:
                 status = resp.status_code if resp else "?"
                 if status in (429, 502, 503, 504):
                     last_error = e
+                    # 429 (rate limit) needs longer cooldown
+                    backoff = 30 if status == 429 else 2 ** attempt * 10
                     self._log.warning(
                         f"API {status} (attempt {attempt + 1}/3), "
-                        f"{'retrying in %ds...' % (2 ** attempt * 10) if attempt < 2 else 'giving up.'}"
+                        f"{'retrying in %ds...' % backoff if attempt < 2 else 'giving up.'}"
                     )
                     if attempt < 2:
-                        time.sleep(2 ** attempt * 10)
+                        time.sleep(backoff)
                 else:
                     raise RuntimeError(f"LLM API request failed: {e}")
             except requests.exceptions.RequestException as e:
@@ -122,6 +124,88 @@ class LLMInterface:
 
         self._log.error(f"API request failed after 3 attempts: {last_error}")
         raise RuntimeError(f"LLM API request failed after 3 retries: {last_error}")
+
+    def generate_stream(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> Generator[str, None, str]:
+        """流式生成，逐 token 产出内容，最终返回完整文本。
+
+        Yields:
+            每步产出一个 token 字符串。
+
+        Returns:
+            生成的完整文本（所有 token 拼接后）。
+        """
+        temp = temperature if temperature is not None else self.temperature
+        tokens = max_tokens if max_tokens is not None else self.max_tokens
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        self._log.info(
+            f"Stream request: model={self.model} temp={temp} "
+            f"max_tokens={tokens} prompt_len={len(prompt)}"
+        )
+
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temp,
+            "max_tokens": tokens,
+            "stream": True,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        collected = []
+        try:
+            start = datetime.now()
+            with requests.post(
+                self.base_url, headers=headers, json=payload,
+                stream=True, timeout=120,
+            ) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    line_text = line.decode("utf-8", errors="replace")
+                    if line_text.startswith("data: "):
+                        data_str = line_text[6:]
+                        if data_str.strip() == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                            delta = chunk.get("choices", [{}])[0].get("delta", {})
+                            content_piece = delta.get("content", "")
+                            if content_piece:
+                                collected.append(content_piece)
+                                yield content_piece
+                        except json.JSONDecodeError:
+                            continue
+
+            elapsed = (datetime.now() - start).total_seconds()
+            full_text = "".join(collected)
+            self._log.info(
+                f"Stream response: elapsed={elapsed:.2f}s "
+                f"tokens={len(collected)} chars={len(full_text)}"
+            )
+            return full_text
+
+        except Exception as e:
+            self._log.error(f"Stream request failed: {e}")
+            # 回退到非流式
+            fallback = self.generate(prompt, system_prompt, temp, tokens)
+            collected.append(fallback.content)
+            yield fallback.content
+            return fallback.content
 
     def generate_structured(self, prompt: str, system_prompt: Optional[str] = None) -> Dict[str, Any]:
         response = self.generate(prompt, system_prompt)

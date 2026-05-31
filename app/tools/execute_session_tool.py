@@ -384,11 +384,19 @@ class ExecuteSessionTool(BaseTool):
 - 如果上述命令失败，尝试 `python3 -m venv ...` 或 `virtualenv ...`
 - 如果提示 venv 模块未找到，运行 `pip install virtualenv` 然后用 virtualenv
 
-### 第二步: 安装依赖
-- 如果有 requirements.txt: `pip install -r requirements.txt`
-- 如果有 setup.py: `pip install -e .`
-- 如果有 pyproject.toml: `pip install -e .`
-- 如果都没有，根据 import 错误反推需要的包
+### 第二步: 安装依赖（重要：批量安装）
+- **不要逐轮试错**——每次只装一个包的方式极其低效
+- **一次性安装核心依赖群**:
+  ```bash
+  pip install -r requirements.txt --disable-pip-version-check  # 如果有
+  pip install -e . --disable-pip-version-check                 # 如果有 setup.py/pyproject.toml
+  ```
+- 如果 `pip install -e .` 安装速度很慢或超时，检查是否在没有 requirements.txt 的情况下触发了重量级依赖（如 TensorFlow、PyTorch）的版本解析。此时**先手动安装该框架**，再装其他：
+  ```bash
+  pip install tensorflow --disable-pip-version-check
+  pip install -e . --no-deps --disable-pip-version-check  # 只装项目本身，不再解析依赖
+  ```
+- 安装完成后**只运行一次验证命令**（如 `python -c "import 项目名; print('OK')"`），确认核心导入成功
 
 ### 第三步: 处理安装失败
 常见问题与解法:
@@ -397,7 +405,7 @@ class ExecuteSessionTool(BaseTool):
 - **需要编译器** (如 cvxopt、progressbar33): 跳过这些包，它们通常只用于少数示例
 - **Python 版本不兼容**: 这是硬限制，诚实报告并结束
 - **网络超时**: 重试 pip install，可加 `--default-timeout=120`
-- 每修复一个错误就重试安装，直到所有核心依赖就绪
+- **一次性批量处理**：如果发现缺了多个依赖（如 tensorflow、gym、absl），不要一个个装，而是合并为一个 pip install 命令
 
 ### 第四步: 执行
 环境就绪后，运行项目的入口脚本/quick_test 验证"""

@@ -18,9 +18,47 @@ class SearchTool(BaseTool):
         self._log = get_logger("search_tool")
         self._llm = get_llm()
 
+    @staticmethod
+    def _clean_query(query: str) -> str:
+        """Remove Chinese/English action prefixes that pollute paper searches.
+
+        User may say "复现 Attention Is All You Need" but arXiv needs just
+        "Attention Is All You Need".  Strips leading action words repeatedly
+        until the query stabilizes (nested actions like "帮我搜索").
+        """
+        import re
+        def ws(pattern: str) -> str:
+            return pattern + r'(?:\s+)?'
+        action_patterns = [
+            ws(r'^复现'), ws(r'^复刻'),
+            r'^reproduce\s+', r'^reproduction\s+of\s+',
+            r'^reproducing\s+',
+            ws(r'^搜索'), ws(r'^查找'), ws(r'^查询'),
+            ws(r'^跑(?:一下|一遍)'),
+            ws(r'^帮我'),
+            ws(r'^看看'),
+            r'^clone\s+', ws(r'^克隆'),
+            ws(r'^实现'),
+            ws(r'^找(?:一下|一找)'),
+            r'^找(?:一下|一找)?\s+关于\s+',
+        ]
+        cleaned = query
+        prev = None
+        while cleaned != prev:
+            prev = cleaned
+            for pattern in action_patterns:
+                cleaned = re.sub(pattern, '', cleaned, count=1).strip()
+        return cleaned if cleaned else query
+
     def execute(self, query: str = "", source: str = "llm", **kwargs) -> ToolResult:
         if not query:
             return self._fail("缺少搜索关键词 (query)")
+
+        # Clean query: strip Chinese/English action prefixes
+        raw_query = query
+        query = self._clean_query(query)
+        if query != raw_query:
+            self._log.info(f"Cleaned query: '{raw_query}' -> '{query}'")
 
         self._log.info(f"Search: [{source}] {query[:80]}")
 
@@ -34,14 +72,23 @@ class SearchTool(BaseTool):
             try:
                 arxiv_result = self._search_arxiv(query)
                 if arxiv_result.success and arxiv_result.metadata.get("results"):
-                    self._enrich_with_llm(arxiv_result, query)
-                    return arxiv_result
+                    # Verify the top arXiv result matches the intended paper
+                    top_result = arxiv_result.metadata["results"][0]
+                    if self._verify_arxiv_result(top_result, query):
+                        self._enrich_with_llm(arxiv_result, query)
+                        return arxiv_result
+                    else:
+                        # Top result doesn't match — fall back to LLM
+                        self._log.info(
+                            f"arXiv top result doesn't match query, "
+                            f"switching to LLM search"
+                        )
             except Exception as e:
                 self._log.warning(f"arXiv search failed: {e}, trying fallback")
 
-            # arXiv found nothing — try LLM fallback before giving up
+            # arXiv found nothing or result doesn't match — try LLM
             if source == "arxiv":
-                self._log.info("arXiv found nothing, trying LLM fallback…")
+                self._log.info("Trying LLM fallback…")
                 try:
                     llm_result = self._search_via_llm(query)
                     if llm_result.success:
@@ -52,6 +99,22 @@ class SearchTool(BaseTool):
                     f"arXiv 和 LLM 均未找到 '{query}' 的相关论文。"
                     f"请尝试调整搜索词，或使用 source=web / source=wikipedia。"
                 )
+            
+            # If source was llm, try LLM now
+            try:
+                llm_result = self._search_via_llm(query)
+                if llm_result.success:
+                    return llm_result
+            except Exception:
+                pass
+                
+            # LLM API potentially failed — try web search before returning error
+            try:
+                return self._search_web(query)
+            except Exception:
+                pass
+                
+            # If all else fails, return the LLM tool result (which has the error)
             return self._search_via_llm(query)
 
         # Repo search (or explicitly non-arxiv source): skip arXiv entirely.
@@ -87,6 +150,59 @@ class SearchTool(BaseTool):
             self._log.warning(f"External search failed: {e}, falling back to LLM")
             return self._search_via_llm(query)
 
+    @staticmethod
+    @staticmethod
+    def _verify_arxiv_result(result: dict, query: str) -> bool:
+        """Check if the top arXiv result plausibly matches the query.
+
+        Strategy: check if the query text (or its core words) appears
+        as a contiguous substring within the result title (or vice versa).
+        arXiv keyword search often returns papers sharing a common word
+        ("need", "attention") that are completely unrelated.
+
+        Bigram overlap serves as a secondary signal for partial matches.
+        """
+        title = result.get("title", "").lower()
+        query_lower = query.lower().strip()
+        import re
+
+        def tokenize(text: str) -> list[str]:
+            return re.findall(r'[a-z0-9]+', text)
+
+        def bigrams(tokens: list[str]) -> set:
+            return {f"{tokens[i]} {tokens[i+1]}" for i in range(len(tokens) - 1)}
+
+        query_tokens = tokenize(query_lower)
+        title_tokens = tokenize(title)
+
+        if not query_tokens or not title_tokens:
+            return True
+
+        # Signal 1: exact substring match (ignoring punctuation/case)
+        # This is the gold standard — correct paper titles contain the query
+        query_normalized = " ".join(query_tokens)
+        title_normalized = " ".join(title_tokens)
+        if query_normalized in title_normalized:
+            return True
+        # Also check if most of title matches query (for arXiv's truncated titles)
+        if len(query_tokens) >= 3:
+            # Check if first N-1 query words appear in title as bigrams
+            q_bigrams = bigrams(query_tokens)
+            t_bigrams_set = bigrams(title_tokens)
+            if q_bigrams and t_bigrams_set:
+                matched = len(q_bigrams & t_bigrams_set)
+                # Require at least half the bigrams to match
+                if matched >= max(1, len(q_bigrams) // 2):
+                    return True
+
+        # Signal 2: for queries that are too short for substring/bigram check
+        if len(query_tokens) <= 2:
+            core_overlap = sum(1 for w in query_tokens if w in title_tokens)
+            if core_overlap == len(query_tokens):
+                return True
+
+        return False
+
     def _enrich_with_llm(self, arxiv_result: ToolResult, query: str):
         """Ask LLM to supplement arXiv results with source-code URLs."""
         try:
@@ -112,6 +228,7 @@ class SearchTool(BaseTool):
                     if source_url not in r.get("urls", []):
                         r.setdefault("urls", []).append(source_url)
         except Exception as e:
+            self._log.warning(f"LLM enrichment failed: {e}")
             self._log.warning(f"LLM enrichment skipped: {e}")
 
     def _search_via_llm(self, query: str) -> ToolResult:

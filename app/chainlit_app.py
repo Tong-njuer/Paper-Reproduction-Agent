@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import asyncio
 import threading
 import time
-from typing import Any
+from typing import Any, Dict, List
 
 import chainlit as cl
 from chainlit.input_widget import Select, Switch, Slider
@@ -26,49 +26,22 @@ from chainlit.input_widget import Select, Switch, Slider
 from app.core.config import get_config
 from app.core.llm import get_llm
 from app.agent.orchestrator import Orchestrator
+from app.chainlit_helpers import (
+    H_BAR,
+    SECTION,
+    STATUS_ICONS,
+    PHASE_MAP,
+    PROVIDER_MODELS,
+    NO_AGENT_TOOL_NAMES,
+    build_agent_summary,
+    format_step_event_lines,
+)
 
 # ---------------------------------------------------------------------------
-# Intent classification
+# Intent classification — delegates to app.agent.intent_classifier
 # ---------------------------------------------------------------------------
 
-AGENT_KEYWORDS = [
-    "复现", "reproduce", "复刻",
-    "搜索", "查询", "找论文",
-    "克隆", "clone",
-    "下载仓库", "下载代码",
-    "跑一下", "运行实验", "执行", "run experiment",
-    "配置环境", "setup", "环境配置", "安装依赖", "配置依赖",
-    # Auxiliary tools
-    "工作区", "workspace",
-    "报告", "report",
-    "仓库", "repo",
-    "配置", "config",
-    "设置", "settings",
-    "统计", "stats", "statistics",
-    "清理", "clean",
-    "检查仓库", "仓库状态",
-]
-
-_CLASSIFY_PROMPT = """判断用户意图：
-- 用户要求复现论文、搜索论文、克隆/下载代码仓库、执行实验 → 回复 AGENT
-- 用户要求查看/管理报告、查看/管理工作区、查看/清理仓库、查看配置、查看统计 → 回复 AGENT
-- 用户是简单问答、闲聊、询问已有论文内容 → 回复 QA
-只回复 AGENT 或 QA，不要其他内容。
-
-用户消息: {message}"""
-
-
-def _classify_intent(message: str) -> str:
-    lower = message.lower()
-    if any(kw in lower for kw in AGENT_KEYWORDS):
-        return "agent"
-    try:
-        llm = get_llm()
-        resp = llm.generate(_CLASSIFY_PROMPT.format(message=message),
-                            max_tokens=8, temperature=0.0)
-        return "agent" if "AGENT" in resp.content.upper() else "qa"
-    except Exception:
-        return "qa"
+from app.agent.intent_classifier import IntentType, get_classifier
 
 
 # ---------------------------------------------------------------------------
@@ -172,12 +145,7 @@ def _build_summary(result: dict | None, steps: list[dict]) -> str:
 
     # All step tool_hints from the plan (so we know what type of plan this is)
     plan_tools = {s.get("tool_hint", "") for s in plan_items}
-    aux_tools = {
-        "list_workspace_tool", "config_tool", "stats_tool",
-        "list_reports_tool", "view_report_tool", "search_reports_tool",
-        "delete_report_tool", "check_repo_tool", "workspace_cleanup_tool",
-    }
-    is_aux_plan = bool(plan_tools & aux_tools) or (
+    is_aux_plan = bool(plan_tools & NO_AGENT_TOOL_NAMES) or (
         len(plan_items) == 1 and total <= 1 and not source_url
     )
 
@@ -261,37 +229,87 @@ def _build_summary(result: dict | None, steps: list[dict]) -> str:
 # last_result etc. are isolated between conversations.
 
 _thread_stores: dict[str, dict] = {}
+_MAX_THREAD_STORES = 50
+
+# Session persistence for page-refresh recovery
+from app.tools.session_store import get_session_store
+_session_store = get_session_store()
 
 def _thread_ctx() -> dict:
-    """Get or create the context dict for the current chat thread."""
-    tid = cl.context.session.thread_id
+    """Get or create the context dict for the current chat thread.
+    NOTE: Does NOT auto-save to disk — use _save_session() explicitly.
+    """
+    try:
+        tid = cl.context.session.thread_id
+    except (AttributeError, RuntimeError):
+        return {"paper_content": "", "last_result": None, "agent_running": False, "_temp": True}
+
     if tid not in _thread_stores:
+        if len(_thread_stores) >= _MAX_THREAD_STORES:
+            oldest = next(iter(_thread_stores))
+            del _thread_stores[oldest]
         _thread_stores[tid] = {
             "paper_content": "",
             "last_result": None,
             "agent_running": False,
+            "_user_messages": [],
         }
     return _thread_stores[tid]
 
 
+def _save_session():
+    """Explicitly save current session to disk.
+    Skips blank sessions — only saves when there's meaningful data.
+    """
+    try:
+        tid = cl.context.session.thread_id
+        ctx = _thread_stores.get(tid)
+        if ctx is None or ctx.get("_temp"):
+            return
+        has_data = (
+            ctx.get("last_result") or ctx.get("paper_content")
+            or ctx.get("_user_messages") or ctx.get("_last_qa")
+        )
+        if not has_data:
+            return
+        _session_store.save(tid, ctx)
+    except Exception:
+        pass
+
+
+def _restore_session(ctx: dict) -> bool:
+    """Restore previous session context and message history.
+    Returns True if any data was restored.
+    """
+    try:
+        tid = cl.context.session.thread_id
+        saved = _session_store.load(tid)
+        if not saved:
+            saved = _session_store.load_latest()
+        if not saved:
+            return False
+        ctx["paper_content"] = saved.get("paper_content", "")
+        ctx["last_result"] = saved.get("last_result")
+        ctx["_user_messages"] = saved.get("user_messages", [])
+        ctx["_messages"] = saved.get("messages", [])
+        has_data = bool(ctx.get("_messages"))
+        return has_data
+    except Exception:
+        pass
+    return False
+
+
 @cl.on_chat_start
 async def on_chat_start():
-    # Initialise fresh context for this thread
     ctx = _thread_ctx()
-    ctx["paper_content"] = ""
-    ctx["last_result"] = None
-    ctx["agent_running"] = False
+    # Try to restore previous session
+    restored = _restore_session(ctx)
 
     config = get_config()
     cl.user_session.set("config", config)
 
     provider = config.llm.provider
-    _PROVIDER_MODELS = {
-        "deepseek": ["deepseek-chat", "deepseek-reasoner",
-                      "deepseek-v4-pro"],
-        "zhipu": ["glm-4-plus", "glm-4-flash", "glm-4", "glm-3-turbo"],
-    }
-    model_values = _PROVIDER_MODELS.get(provider, _PROVIDER_MODELS["zhipu"])
+    model_values = PROVIDER_MODELS.get(provider, PROVIDER_MODELS["zhipu"])
     # Ensure current model is in the list
     current_model = config.llm.model
     if current_model not in model_values:
@@ -328,6 +346,50 @@ async def on_chat_start():
         "- 💬 **论文问答** — 基于论文内容解答你的问题\n\n"
         "直接告诉我你想复现的论文名称即可！"
     )).send()
+    # Save the restored context immediately so it's not lost on next refresh
+    _save_session()
+
+    # Replay historical messages if session was restored
+    if restored:
+        await _replay_messages(ctx)
+
+
+async def _replay_messages(ctx: dict):
+    """Replay saved messages into the Chainlit UI so the full conversation is visible."""
+    messages = ctx.get("_messages", [])
+    if not messages:
+        return
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if role == "user":
+            await cl.Message(content=content, author="你").send()
+        elif role == "assistant":
+            await cl.Message(content=content[:2000], author="助手").send()
+    # Divider to separate history from the current session
+    divider = "━" * 40 + "\n\n*以上为历史消息，继续当前对话*"
+    await cl.Message(content=divider, author="系统").send()
+
+
+def _save_message(role: str, content: str):
+    """Append a message to the context's message list and persist to disk."""
+    ctx = _thread_ctx()
+    ctx.setdefault("_messages", []).append({
+        "role": role,
+        "content": content[:2000],
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+    })
+    _save_session()
+
+
+@cl.on_chat_end
+async def on_chat_end():
+    """Clean up thread context when the chat session ends (page refresh / close)."""
+    try:
+        tid = cl.context.session.thread_id
+        _thread_stores.pop(tid, None)
+    except (AttributeError, RuntimeError):
+        pass
 
 
 @cl.on_settings_update
@@ -377,8 +439,36 @@ async def on_message(message: cl.Message):
     if not goal:
         return
 
-    intent = _classify_intent(goal)
-    if intent == "agent":
+    # ── Classify intent using the proper IntentClassifier with context ──
+    ctx = _thread_ctx()
+    last_result = ctx.get("last_result") or {}
+    paper_content = ctx.get("paper_content", "")
+
+    # Build context string for the classifier
+    context_parts = []
+    if last_result:
+        status = "成功" if last_result.get("success") else "失败"
+        context_parts.append(
+            f"上一次执行: 目标={last_result.get('goal', '')}, "
+            f"结果={status}, "
+            f"源码={last_result.get('source_url', '无')}"
+        )
+        if last_result.get("errors"):
+            context_parts.append(f"错误数: {len(last_result.get('errors', []))}")
+    if paper_content:
+        context_parts.append(f"已有论文内容: {len(paper_content)} 字符")
+    context_str = " | ".join(context_parts) if context_parts else ""
+
+    classifier = get_classifier()
+    intent, requires_agent = classifier.classify(goal, context_str)
+
+    # ── Save user message & persist ──
+    ctx.setdefault("_user_messages", []).append(goal[:200])
+    _save_message("user", goal)
+    _save_session()
+
+    # ── Route based on intent ──
+    if requires_agent:
         await _handle_agent_task(goal)
     else:
         await _handle_simple_qa(goal)
@@ -388,46 +478,112 @@ async def on_message(message: cl.Message):
 # Simple QA
 # ---------------------------------------------------------------------------
 
-_QA_PROMPT = """你是一个论文问答助手。请基于论文内容回答用户的问题。
-
-论文内容:
-{paper_content}
-
-用户问题: {question}
+_QA_PROMPT = """你是一个论文复现助手。根据提供的论文内容和复现执行记录，回答用户的问题。
 
 回答原则:
-- 优先从论文内容中提取相关信息回答，可以适当展开和组织
-- 对于开放性问题（如"还讲了什么"），请梳理论文内容中尚未提及的要点
-- 如果论文内容有限（如仅有摘要），可以结合你的知识补充说明，但需标注哪些来自论文、哪些是你的补充
-- 即使信息不完整，也尽量提供有帮助的回答，而不是简单地说"未涉及"
-- 只有当你完全无法从论文内容和自身知识中找到任何相关回答时，才说明无法回答
+- 如果问题涉及复现过程（步骤、错误、结果），优先从**复现执行记录**中提取信息
+- 如果问题涉及论文内容（方法、实验、结论），优先从**论文内容**中提取信息
+- 可以结合你的知识补充说明，但需标注哪些来自记录、哪些是你的补充
+- 对于"讲解一下你是如何复现的"这类问题，按照执行步骤逐步说明过程
+- 对于"遇到了什么错误"，列出错误及修复方式
+- 对于"复现成功的标志是什么"，说明安装验证通过、核心导入成功等
+- 如果信息不完整，也尽量提供有帮助的回答
+- 只有当你完全无法从提供的信息中找到相关回答时，才说明无法回答
 
 请用中文回答，平实准确。"""
 
 
 async def _handle_simple_qa(question: str):
-    paper_content = _thread_ctx().get("paper_content", "")
+    ctx = _thread_ctx()
+    paper_content = ctx.get("paper_content", "")
+    last_result = ctx.get("last_result") or {}
 
-    if not paper_content:
-        await cl.Message(content=(
-            "目前还没有已加载的论文内容。\n\n"
-            "你可以先告诉我你想复现的论文名称（如「复现 Attention Is All You Need」），"
-            "我会自动搜索并阅读论文内容，然后你就可以基于论文内容提问了。"
-        )).send()
+    # Build rich context from the last agent run (if any)
+    reproduction_summary = ""
+    if last_result:
+        goal = last_result.get("goal", "")
+        source_url = last_result.get("source_url", "")
+        errors = last_result.get("errors", [])
+        success = last_result.get("success", False)
+        steps = last_result.get("steps", [])
+        # Extract execution observations
+        exec_notes = []
+        for s in steps:
+            if s.get("status") == "success" and s.get("observation"):
+                obs = s["observation"][:300]
+                exec_notes.append(f"  Step {s['step_id']} ({s.get('action', '?')}): {obs}")
+        reproduction_summary = "\n".join([
+            f"## 上次复现执行记录",
+            f"目标: {goal}",
+            f"结果: {'成功' if success else '失败'}",
+            f"源码: {source_url}" if source_url else "",
+            f"错误: {len(errors)} 个" if errors else "",
+            "",
+            "### 执行步骤详情",
+            *exec_notes,
+        ])
+
+    # ── 无论文内容且无复现记录时，当作通用 LLM 问答 ──
+    if not paper_content and not reproduction_summary:
+        thinking = cl.Message(content="🤔 思考中…")
+        await thinking.send()
+        try:
+            llm = get_llm()
+            # Build conversation history context
+            history_lines = []
+            for msg in ctx.get("_messages", [])[-8:]:  # last 8 turns
+                role = "用户" if msg["role"] == "user" else "助手"
+                history_lines.append(f"{role}: {msg['content'][:300]}")
+            history_text = "\n".join(history_lines)
+            if history_text:
+                prompt = f"你是一个友好的 AI 助手。以下是我们的对话历史：\n\n{history_text}\n\n用户: {question}\n\n助手:"
+            else:
+                prompt = f"你是一个友好的 AI 助手。请回答用户的问题。\n\n用户: {question}\n\n助手:"
+            loop = asyncio.get_running_loop()
+            resp = await loop.run_in_executor(
+                None, lambda: llm.generate(prompt, max_tokens=1024)
+            )
+            await thinking.remove()
+            await cl.Message(content=resp.content).send()
+            _save_message("assistant", resp.content)
+        except Exception as e:
+            await thinking.remove()
+            await cl.Message(content=f"抱歉，回答出错: {e}").send()
         return
 
-    msg = cl.Message(content="")
-    await msg.send()
+    # ── 有论文/复现上下文时 ──
+    thinking = cl.Message(content="🤔 正在结合上下文分析…")
+    await thinking.send()
 
     try:
         llm = get_llm()
-        prompt = _QA_PROMPT.format(paper_content=paper_content[:8000], question=question)
-        resp = llm.generate(prompt, max_tokens=1024)
-        msg.content = resp.content
-    except Exception as e:
-        msg.content = f"问答出错: {e}"
+        # Build prompt with conversation history for context
+        history_lines = []
+        for msg in ctx.get("_messages", [])[-6:]:  # last 6 turns
+            role = "用户" if msg["role"] == "user" else "助手"
+            history_lines.append(f"{role}: {msg['content'][:300]}")
+        history_text = "\n".join(history_lines)
 
-    await msg.update()
+        prompt_parts = [_QA_PROMPT]
+        if history_text:
+            prompt_parts.append(f"\n## 对话历史\n{history_text}")
+        if reproduction_summary:
+            prompt_parts.append(f"\n{reproduction_summary}")
+        if paper_content:
+            prompt_parts.append(f"\n## 论文内容\n{paper_content[:6000]}")
+        prompt_parts.append(f"\n## 用户问题\n{question}")
+        prompt = "\n".join(prompt_parts)
+
+        loop = asyncio.get_running_loop()
+        resp = await loop.run_in_executor(
+            None, lambda: llm.generate(prompt, max_tokens=2048)
+        )
+        await thinking.remove()
+        await cl.Message(content=resp.content).send()
+        _save_message("assistant", resp.content)
+    except Exception as e:
+        await thinking.remove()
+        await cl.Message(content=f"问答出错: {e}").send()
 
 
 # ---------------------------------------------------------------------------
@@ -450,7 +606,24 @@ async def _handle_agent_task(raw_goal: str):
 
     _thread_ctx()["agent_running"] = True
 
-    # ── 1. Execution step FIRST — the "深度思考" panel ──
+    # ── 1. Persistent status indicator (updates in real-time) ──
+    status_msg = cl.Message(content="🤖 准备开始…")
+    await status_msg.send()
+
+    def update_status(phase: str, detail: str = ""):
+        icon = STATUS_ICONS.get(phase, "🤖")
+        text = f"{icon} {detail}" if detail else f"{icon} {phase}…"
+        loop.call_soon_threadsafe(
+            lambda: asyncio.ensure_future(_update_msg(status_msg, text))
+        )
+
+    async def _update_msg(msg: cl.Message, text: str):
+        msg.content = text
+        await msg.update()
+
+    update_status("thinking", "分析意图…")
+
+    # ── 2. Execution step — the "深度思考" panel ──
     step = cl.Step(
         name="Agent Execution",
         type="tool",
@@ -458,6 +631,8 @@ async def _handle_agent_task(raw_goal: str):
         default_open=True,
     )
     await step.send()
+    # Remove status message once step panel is up
+    await status_msg.remove()
 
     # ── 3. Thread → async bridge ──
     queue: asyncio.Queue = asyncio.Queue()
@@ -475,10 +650,18 @@ async def _handle_agent_task(raw_goal: str):
     # ── 4. Run orchestrator ──
     holder: dict = {}
 
+    # Build conversation history context for the orchestrator
+    ctx_conversation = _thread_ctx()
+    conv_lines = []
+    for msg in ctx_conversation.get("_messages", [])[-10:]:
+        role = "用户" if msg["role"] == "user" else "助手"
+        conv_lines.append(f"{role}: {msg['content'][:300]}")
+    conversation_context = "## 对话历史\n" + "\n".join(conv_lines) if conv_lines else ""
+
     def _run():
         try:
             orch = Orchestrator(on_step=on_step, on_log=on_log)
-            holder["result"] = orch.run(goal).to_dict()
+            holder["result"] = orch.run(goal, conversation_context=conversation_context).to_dict()
         except Exception as exc:
             holder["error"] = str(exc)
             push({"kind": "error", "message": str(exc)})
@@ -488,7 +671,7 @@ async def _handle_agent_task(raw_goal: str):
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
 
-    # ── 5. Process events → stream to step ──
+    # ── 5. Process events → stream to step with flush ──
     step_output_lines: list[str] = []
     plan_items: list[dict] = []
     step_terminal: dict[str, list[str]] = {}  # step_id → log lines
@@ -528,9 +711,12 @@ async def _handle_agent_task(raw_goal: str):
 
         elif kind == "step":
             all_step_events.append(ev)
-            line = _format_step_event(ev, plan_items)
-            if line:
-                await step.stream_token(line)
+            # Format step events into lines and stream each line individually
+            lines = _format_step_event_lines(ev, plan_items)
+            for line in lines:
+                if line:
+                    await step.stream_token(line + "\n")
+                    await step.update()  # Flush to UI immediately
             # Update step tracking + live step name
             t = ev.get("type", "")
             if t == "plan":
@@ -543,6 +729,11 @@ async def _handle_agent_task(raw_goal: str):
             elif t == "step_start":
                 cur_step_id = ev.get("step_id", "")
                 desc = ev.get("description", "")
+                # Map tool_hint to status icon for the live indicator
+                tool_hint = ev.get("tool_hint", "")
+                phase = PHASE_MAP.get(tool_hint, "")
+                if phase:
+                    update_status(phase, desc[:60])
                 step.name = f"Agent Execution · {desc}"
                 await step.update()
             elif t == "sub_step":
@@ -587,6 +778,7 @@ async def _handle_agent_task(raw_goal: str):
     ack_content = _build_summary(result, all_step_events)
     ack = cl.Message(content=ack_content)
     await ack.send()
+    _save_message("assistant", ack_content)
 
     # Send full report as a separate message if available
     if result and result.get("summary"):
@@ -596,13 +788,16 @@ async def _handle_agent_task(raw_goal: str):
         if len(full_report) > 300:
             report_msg = cl.Message(content=f"### 📋 完整复现报告\n\n{full_report}")
             await report_msg.send()
+            _save_message("assistant", f"### 📋 完整复现报告\n\n{full_report[:1500]}")
 
-    # Store for context
+    # Store for context and persist for page-refresh recovery
     if result:
         _thread_ctx()["paper_content"] = result.get("paper_content", "")
         _thread_ctx()["last_result"] = result
+        _save_session()
 
     _thread_ctx()["agent_running"] = False
+    _save_session()
 
 
 # ---------------------------------------------------------------------------
@@ -610,55 +805,55 @@ async def _handle_agent_task(raw_goal: str):
 # ---------------------------------------------------------------------------
 
 # Box-drawing characters for visual hierarchy in step output
-H_BAR = "━"
-SECTION = lambda title: f"\n{H_BAR * 3} {title} {H_BAR * (50 - len(title))}"
+# H_BAR and SECTION are imported from app.chainlit_helpers
 
-def _format_step_event(ev: dict, plan_items: list[dict]) -> str | None:
-    """Convert an orchestrator step event into a structured plain-text line.
+def _format_step_event_lines(ev: dict, plan_items: list[dict]) -> list[str]:
+    """Convert an orchestrator step event into one or more lines.
 
-    Uses box-drawing chars, indentation, and [TAG] markers for visual
-    hierarchy — readable like a structured terminal log.
+    Each line is streamed individually so the UI updates line by line
+    rather than showing the entire event at once.
     """
     t = ev.get("type", "")
     sid = ev.get("step_id", "")
+    result: list[str] = []
 
     if t == "plan":
         steps = ev.get("steps", [])
-        lines = [SECTION(f"Plan · {len(steps)} steps")]
+        result.append(SECTION(f"Plan · {len(steps)} steps"))
         for s in steps:
             tool = f" [{s.get('tool_hint')}]" if s.get("tool_hint") else ""
-            lines.append(f"  [{s['step_id']}] {s['description']}{tool}")
-        lines.append(H_BAR * 55)
-        return "\n".join(lines) + "\n"
+            result.append(f"  [{s['step_id']}] {s['description']}{tool}")
+        result.append(H_BAR * 55)
+        return result
 
     elif t == "step_start":
         desc = ev.get("description", "")
-        return SECTION(f"Step {sid}: {desc}") + "\n"
+        return [SECTION(f"Step {sid}: {desc}")]
 
     elif t == "react":
         thought = ev.get("thought", "")[:200]
         action = ev.get("action", "")
-        lines = [f"  > {thought}"]
+        result.append(f"  > {thought}")
         if action:
-            lines.append(f"  action: {action}")
-        return "\n".join(lines) + "\n"
+            result.append(f"  action: {action}")
+        return result
 
     elif t == "observation":
         obs = ev.get("observation", "")[:300]
         tag = "[OK]" if ev.get("status") == "success" else "[FAIL]"
-        return f"\n  {tag}  {obs}\n"
+        return [f"  {tag}  {obs}"]
 
     elif t == "reflection":
         analysis = ev.get("analysis", {})
         explanation = analysis.get("explanation", "")[:200]
         error_type = analysis.get("error_type", "")
         if explanation:
-            return f"\n  [REFLECT] {error_type}: {explanation}\n"
-        return None
+            return [f"  [REFLECT] {error_type}: {explanation}"]
+        return []
 
     elif t == "replan":
         new_count = len(ev.get("steps", []))
-        return f"  [REPLAN] {new_count} new steps\n"
+        return [f"  [REPLAN] {new_count} new steps"]
 
     elif t == "sub_step":
         phase = ev.get("phase", "")
@@ -667,26 +862,26 @@ def _format_step_event(ev: dict, plan_items: list[dict]) -> str | None:
         if phase == "run":
             reason = ev.get("detail", "")[:120]
             cmd = ev.get("command", "")[:150]
-            lines = [f"    ── Round {rnd}/{max_rnd} ──"]
+            result.append(f"    ── Round {rnd}/{max_rnd} ──")
             if reason:
-                lines.append(f"    {reason}")
-            lines.append(f"    $ {cmd}")
-            return "\n".join(lines) + "\n"
+                result.append(f"    {reason}")
+            result.append(f"    $ {cmd}")
+            return result
         elif phase == "result":
             status = ev.get("status", "")
             detail = ev.get("detail", "")
             tag = "[OK]" if status == "success" else "[FAIL]"
-            return f"    {tag}  {detail}\n"
+            return [f"    {tag}  {detail}"]
         elif phase == "done":
             detail = ev.get("detail", "")[:200]
             status = ev.get("status", "")
             tag = "[DONE]" if status == "success" else "[FAIL]"
-            return f"    {tag}  {detail}\n\n"
+            return [f"    {tag}  {detail}"]
         elif phase == "error":
             detail = ev.get("detail", "")[:200]
-            return f"    [FATAL] {detail}\n"
+            return [f"    [FATAL] {detail}"]
         elif phase == "reflect":
             detail = ev.get("detail", "")[:200]
-            return f"\n    [REFLECT] {detail}\n"
+            return [f"    [REFLECT] {detail}"]
 
-    return None
+    return []
