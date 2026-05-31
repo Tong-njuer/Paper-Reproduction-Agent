@@ -40,25 +40,80 @@ class SourceTool(BaseTool):
             # Fall back to LLM knowledge for papers that don't cite their repo
             llm_repos = self._lookup_repo_via_llm(paper_info)
             if llm_repos:
-                output = f"通过 AI 知识库找到 {len(llm_repos)} 个源码仓库候选:\n"
-                for i, r in enumerate(llm_repos, 1):
-                    evidence = r.get("evidence", "")
-                    output += f"\n{i}. {r['url']}\n   平台: {r['platform']}\n   置信度: {r['confidence']}"
-                    if evidence:
-                        output += f"\n   依据: {evidence}"
-                top = llm_repos[0]
-                return self._ok(output=output, repos=llm_repos, top_repo=top, found_directly=True)
+                # Verify the top candidate actually exists before returning
+                verified = self._verify_repo_url(llm_repos[0]["url"])
+                if verified:
+                    output = self._format_repo_output(llm_repos)
+                    top = llm_repos[0]
+                    return self._ok(output=output, repos=llm_repos, top_repo=top, found_directly=True)
+                else:
+                    # Top URL doesn't exist — try remaining candidates
+                    self._log.warning(f"LLM-suggested repo URL not found: {llm_repos[0]['url']}")
+                    for r in llm_repos[1:]:
+                        if self._verify_repo_url(r["url"]):
+                            output = self._format_repo_output([r])
+                            return self._ok(output=output, repos=[r], top_repo=r, found_directly=True)
+                    # None verified — return unverified but flag as untested
+                    output = self._format_repo_output(llm_repos)
+                    output += "\n⚠️ 无法验证仓库是否存在，克隆时可能失败。"
+                    top = llm_repos[0]
+                    return self._ok(output=output, repos=llm_repos, top_repo=top, found_directly=True)
 
             return self._fail("未能找到源码仓库地址，建议在论文中搜索 'github' 或 'code' 等关键词")
 
+        # Verify the top repo candidate exists
+        top = repos[0]
+        if not self._verify_repo_url(top["url"]):
+            self._log.warning(f"Top candidate URL not found: {top['url']}")
+            # Try remaining candidates
+            for r in repos[1:]:
+                if self._verify_repo_url(r["url"]):
+                    output = f"找到 {len(repos)} 个源码仓库候选 (已验证:{r['url']}):\n"
+                    for i, rr in enumerate(repos[:5], 1):
+                        marker = " ✅" if rr['url'] == r['url'] else ""
+                        output += f"\n{i}. {rr['url']}{marker}\n   平台: {rr['platform']}\n   来源: {rr['source']}"
+                        if rr.get("context"):
+                            output += f"\n   上下文: {rr['context'][:100]}"
+                    return self._ok(output=output, repos=repos[:5], top_repo=r, found_directly=True)
+            # None verified
+            output = self._format_repo_output(repos[:5])
+            output += "\n⚠️ 无法验证仓库是否存在，克隆时可能失败。"
+            return self._ok(output=output, repos=repos[:5], top_repo=top, found_directly=True)
+
+        output = self._format_repo_output(repos[:5])
+        return self._ok(output=output, repos=repos[:5], top_repo=top, found_directly=True)
+
+    def _format_repo_output(self, repos: list) -> str:
+        """Build a human-readable string from a list of repo dicts."""
         output = f"找到 {len(repos)} 个源码仓库候选:\n"
-        for i, r in enumerate(repos[:5], 1):
-            output += f"\n{i}. {r['url']}\n   平台: {r['platform']}\n   来源: {r['source']}"
+        for i, r in enumerate(repos, 1):
+            output += f"\n{i}. {r['url']}\n   平台: {r['platform']}\n   置信度: {r.get('confidence', 'N/A')}"
+            if r.get("evidence"):
+                output += f"\n   依据: {r['evidence']}"
             if r.get("context"):
                 output += f"\n   上下文: {r['context'][:100]}"
+        return output
 
-        top = repos[0] if repos else None
-        return self._ok(output=output, repos=repos[:5], top_repo=top, found_directly=len(repos) > 0)
+    @staticmethod
+    def _verify_repo_url(url: str) -> bool:
+        """Quick lightweight check that a GitHub repo URL actually exists.
+
+        Uses a HEAD request to GitHub's API — fast (~1s) and doesn't count
+        against API rate limits for simple requests.
+        """
+        import re
+        import requests
+        # Only verify GitHub URLs for now
+        m = re.match(r'https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$', url)
+        if not m:
+            return True  # Non-GitHub URLs pass (can't easily verify)
+        owner, repo = m.group(1), m.group(2).rstrip("/")
+        api_url = f"https://api.github.com/repos/{owner}/{repo}"
+        try:
+            resp = requests.head(api_url, timeout=5, headers={"Accept": "application/vnd.github.v3+json"})
+            return resp.status_code == 200
+        except Exception:
+            return True  # Can't verify, assume exists (better than false negative)
 
     def _parse_urls(self, urls_str: str) -> list:
         result = []

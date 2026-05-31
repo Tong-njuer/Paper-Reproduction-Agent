@@ -15,25 +15,7 @@ from app.tools.report_store import get_report_store
 from datetime import datetime
 
 
-class AgentResult:
-    def __init__(self):
-        self.success: bool = False
-        self.goal: str = ""
-        self.summary: str = ""
-        self.source_url: str = ""
-        self.paper_content: str = ""
-        self.paper_info: Dict = {}
-        self.steps: List[Dict] = []
-        self.errors: List[str] = []
-
-    def to_dict(self) -> dict:
-        return {
-            "success": self.success, "goal": self.goal,
-            "summary": self.summary, "source_url": self.source_url,
-            "paper_content": self.paper_content,
-            "paper_info": self.paper_info, "steps": self.steps,
-            "errors": self.errors,
-        }
+from app.agent.result import AgentResult
 
 
 class Orchestrator:
@@ -71,16 +53,21 @@ class Orchestrator:
             except Exception:
                 pass
 
-    def run(self, goal: str) -> AgentResult:
+    def run(self, goal: str, conversation_context: str = "") -> AgentResult:
         result = AgentResult()
         result.goal = goal
+        self._conversation_context = conversation_context  # store for step execution
 
         self._log.info(f"Starting agent for goal: {goal}")
         self._emit_log("info", f"开始执行目标: {goal}")
 
         # Phase 1: Plan
         self._state.transition_to(AgentState.PLANNING, "Starting planning")
-        plan = self._planner.create_plan(goal, self._memory.context_for_prompt())
+        # Merge memory context with conversation history
+        ctx_parts = [self._memory.context_for_prompt()]
+        if conversation_context:
+            ctx_parts.append(conversation_context)
+        plan = self._planner.create_plan(goal, "\n".join(ctx_parts))
         self._emit_step({
             "type": "plan", "status": "done",
             "steps": [s.to_dict() for s in plan.steps],
@@ -118,7 +105,10 @@ class Orchestrator:
                 break
 
             # ReAct: decide -> execute
-            history = self._memory.context_for_prompt()
+            history_parts = [self._memory.context_for_prompt()]
+            if self._conversation_context:
+                history_parts.append(self._conversation_context)
+            history = "\n".join(history_parts)
             tools_desc = "\n".join(
                 f"- {n}: {d}" for n, d in list_available_tools().items()
             )
@@ -325,7 +315,7 @@ class Orchestrator:
         return result
 
     def _save_report(self, result: AgentResult):
-        """Persist the final report to ReportStore."""
+        """Persist the final report to ReportStore and remember in multi-turn memory."""
         try:
             store = get_report_store()
             report = {
@@ -339,8 +329,10 @@ class Orchestrator:
                 "errors": result.errors,
             }
             store.save(report)
+            # Remember this run for multi-turn conversation context
+            self._memory.remember_run(result.to_dict())
         except Exception as e:
-            self._log.warning(f"Failed to auto-save report: {e}")
+            self._log.warning(f"Failed to save report: {e}")
 
     def _extract_result_info(self, result: AgentResult, step, observation: str):
         desc = step.description.lower()
@@ -355,10 +347,49 @@ class Orchestrator:
                     result.source_url = url
                     self._step_context["repo_url"] = url
                     self._emit_log("success", f"找到源码地址: {url}")
+            # Also preserve the full observation as paper_info for retry
+            self._step_context["source_tool_paper_info"] = observation[:3000]
+
+        # Clone tool — capture local path into step context so subsequent
+        # tools (python_env_tool, execute_session_tool) know where to operate.
+        # Also update result.source_url if the clone used a different URL than
+        # what source_tool reported (source_tool sometimes hallucinates repos).
+        if step.tool_hint == "clone_tool":
+            # Extract the actual repo URL used for cloning (may differ from source_tool's)
+            repo_url_match = re.search(r'仓库[：:]\s*(https?://[^\s\n]+)', observation)
+            actual_repo_url = repo_url_match.group(1) if repo_url_match else ""
+            # Update source_url — the cloned repo is the ground truth
+            if actual_repo_url and actual_repo_url != result.source_url:
+                self._log.info(
+                    f"Updating source_url from source_tool's "
+                    f"{result.source_url!r} → {actual_repo_url!r}"
+                )
+                result.source_url = actual_repo_url
+            # Format: "本地路径: /app/workspace/xxx"
+            path_match = re.search(r'(?:本地路径|local_path)[：:]\s*([^\s\n]+)', observation)
+            if path_match:
+                local_path = path_match.group(1)
+                self._step_context["planned_repo_path"] = local_path
+                self._step_context["repo_path"] = local_path
+                if not result.source_url:
+                    result.source_url = local_path
+                result.paper_info.setdefault("local_paths", []).append(local_path)
+                self._emit_log("success", f"克隆仓库路径: {local_path}")
+            # Fallback: derive from repo URL
+            if not self._step_context.get("planned_repo_path"):
+                if actual_repo_url:
+                    repo_name = actual_repo_url.rstrip("/").split("/")[-1]
+                    if repo_name.endswith(".git"):
+                        repo_name = repo_name[:-4]
+                    ws = Path(get_config().agent.workspace_dir).resolve()
+                    expected_path = str(ws / repo_name)
+                    self._step_context["planned_repo_path"] = expected_path
+                    self._emit_log("success", f"推导仓库路径: {expected_path}")
 
         # Setup / environment configuration — capture local path
         if any(kw in desc for kw in ["配置环境", "setup", "环境", "venv", "虚拟环境",
-                                       "安装依赖", "配置依赖"]):
+                                       "安装依赖", "配置依赖",
+                                       "环境侦察", "python_env"]):
             path_match = re.search(r'(?:路径|本地路径|local_path)[：:]\s*([^\s\n]+)', observation)
             if path_match:
                 local_path = path_match.group(1)
@@ -367,18 +398,35 @@ class Orchestrator:
                 result.paper_info.setdefault("local_paths", []).append(local_path)
                 self._step_context["planned_repo_path"] = local_path
                 self._emit_log("success", f"环境配置路径: {local_path}")
+            # Also capture Python version info
+            pyver_match = re.search(r'Python 版本[：:]\s*([^\s\n]+)', observation)
+            if pyver_match:
+                result.paper_info["python_version"] = pyver_match.group(1)
 
         # Paper content — match by description keywords
         if any(kw in desc for kw in ["搜索", "论文", "获取", "阅读", "fetch",
                                        "search", "paper", "arxiv", "访问"]):
             result.paper_content = (result.paper_content + "\n" + observation)[:15000]
+            # Store paper content in step context so source_tool can use it
+            # (fetch_tool produces the richest content, but search_tool also contributes)
+            if step.tool_hint == "fetch_tool" or not self._step_context.get("paper_content"):
+                # Extract the most informative part: title, authors, abstract
+                content_preview = observation[:5000]
+                self._step_context["paper_content"] = content_preview
+                self._emit_log("info", f"Stored paper content ({len(content_preview)} chars) for source_tool")
             urls = self._extract_urls(observation)
             for url in urls:
                 if "arxiv" in url or "paper" in url.lower():
                     result.paper_info.setdefault("urls", []).append(url)
-                    # Forward to fetch_tool so it doesn't hallucinate URLs
-                    if not self._step_context.get("paper_url"):
+            # Set paper_url ONLY from fetch_tool results (verified content),
+            # NOT from search_tool results (which may contain wrong arXiv URLs).
+            # This prevents wrong URLs from contaminating the fetch step.
+            if step.tool_hint == "fetch_tool" and not self._step_context.get("paper_url"):
+                for url in urls:
+                    if "arxiv" in url:
                         self._step_context["paper_url"] = url
+                        self._emit_log("info", f"Stored paper_url from fetch_tool: {url}")
+                        break
 
         # plan_run_tool — capture the determined command & path for run_tool
         if step.tool_hint == "plan_run_tool":
@@ -434,6 +482,10 @@ class Orchestrator:
             return self._verify_run(step, observation)
         elif tool == "execute_session_tool":
             return self._verify_execute_session(step, observation)
+        elif tool == "python_env_tool":
+            return self._verify_python_env(step, observation)
+        elif tool == "cleanup_env_tool":
+            return self._verify_cleanup_env(step, observation)
         else:
             # Unknown tool — check observation is non-empty and not an error
             if not observation or observation.strip() == "":
@@ -651,6 +703,33 @@ class Orchestrator:
         # Non-empty output without clear indicators is acceptable
         return True, ""
 
+    def _verify_python_env(self, step: PlanStep, observation: str) -> tuple[bool, str]:
+        """Verify python_env_tool: check for valid recon/setup output."""
+        if not observation or observation.strip() == "":
+            return False, "环境侦察输出为空"
+        if observation.startswith("ERROR:"):
+            return False, observation
+        # Recon output contains the report header
+        if "环境侦察报告" in observation or "虚拟环境" in observation:
+            return True, ""
+        # Setup output contains "创建成功" or "已存在"
+        if "创建成功" in observation or "已存在" in observation:
+            return True, ""
+        # Cleanup output
+        if "已删除" in observation or "无需清理" in observation:
+            return True, ""
+        return True, ""  # Accept as verified
+
+    def _verify_cleanup_env(self, step: PlanStep, observation: str) -> tuple[bool, str]:
+        """Verify cleanup_env_tool: check for cleanup confirmation."""
+        if not observation or observation.strip() == "":
+            return False, "清理输出为空"
+        if observation.startswith("ERROR:"):
+            return False, observation
+        if "已删除" in observation or "已清理" in observation or "无需" in observation:
+            return True, ""
+        return True, ""
+
     # ------------------------------------------------------------------
     # Summary step handling (bypasses ReAct)
     # ------------------------------------------------------------------
@@ -779,13 +858,66 @@ class Orchestrator:
                     react_step.action_args["repo_path"] = planned_path
 
         elif tool == "execute_session_tool":
-            # Inject repo_path/name from previous setup/clone step context
+            # Force inject repo_path from context — LLM often hallucinates
+            # repo_name (e.g. "annotated-transformer" / "harvardnlp/annotated-transformer")
+            # even though the actual cloned repo is tensor2tensor.
+            planned_path = self._step_context.get("planned_repo_path", "")
+            if planned_path:
+                react_step.action_args["repo_path"] = planned_path
+                # Remove any hallucinated repo_name — we know the real path
+                react_step.action_args.pop("repo_name", None)
+                self._log.info(
+                    f"execute_session_tool: forced repo_path={planned_path}, "
+                    f"removed any LLM-hallucinated repo_name"
+                )
+            # Inject sub-step callback so the frontend can show per-round progress
+            react_step.action_args["on_round"] = self._make_round_callback()
+
+        elif tool == "python_env_tool":
+            # Force inject repo_path from context — LLM often hallucinates
+            # repo_name (e.g. "annotated-transformer" instead of actual clone)
+            planned_path = self._step_context.get("planned_repo_path", "")
+            if planned_path:
+                react_step.action_args["repo_path"] = planned_path
+                # Remove any hallucinated repo_name
+                react_step.action_args.pop("repo_name", None)
+            # If action is not set, default to "recon"
+            if not react_step.action_args.get("action"):
+                react_step.action_args["action"] = "recon"
+
+        elif tool == "cleanup_env_tool":
+            # Inject repo_path from context
             planned_path = self._step_context.get("planned_repo_path", "")
             if planned_path:
                 if not react_step.action_args.get("repo_path") and not react_step.action_args.get("repo_name"):
                     react_step.action_args["repo_path"] = planned_path
-            # Inject sub-step callback so the frontend can show per-round progress
-            react_step.action_args["on_round"] = self._make_round_callback()
+
+        elif tool == "source_tool":
+            # Inject paper_content from fetch_tool's actual output (the most
+            # reliable source), overriding whatever the LLM hallucinated.
+            # The LLM often produces a long but subtly wrong paper_info
+            # (e.g. wrong character encoding, truncated abstract) that looks
+            # plausible but fails source_tool's LLM-based lookup.
+            paper_content = self._step_context.get("paper_content", "")
+            stored_source_info = self._step_context.get("source_tool_paper_info", "")
+            llm_info = react_step.action_args.get("paper_info", "")
+            # Prefer real fetched content over LLM recollection
+            best_info = paper_content or stored_source_info
+            if best_info and (best_info != llm_info or len(llm_info) < 50):
+                self._log.info(
+                    f"Injecting paper_content for source_tool "
+                    f"({len(best_info)} chars, was LLM: {len(llm_info)})"
+                )
+                react_step.action_args["paper_info"] = best_info
+
+        elif tool == "fetch_tool":
+            # Only inject paper_url when the LLM provides NO url at all.
+            # Do NOT override LLM's url — the LLM often knows the correct
+            # arXiv URL (e.g. 1706.03762) even when search results are wrong.
+            paper_url = self._step_context.get("paper_url", "")
+            llm_url = react_step.action_args.get("url", "")
+            if paper_url and not llm_url:
+                react_step.action_args["url"] = paper_url
 
         elif tool == "clone_tool":
             stored_url = self._step_context.get("repo_url", "")

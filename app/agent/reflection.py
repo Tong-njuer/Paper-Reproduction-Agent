@@ -174,7 +174,7 @@ class Reflection:
         elif any(kw in el for kw in ["import", "导入", "no module"]):
             return ErrorAnalysis("import_error", "Python 包导入失败，依赖可能未正确安装", "medium")
         elif any(kw in el for kw in ["no repo", "没有.*仓库", "多个仓库"]):
-            return ErrorAnalysis("ambiguous_repo", "仓库选择不明确，需要用户指定", "low")
+            return ErrorAnalysis("ambiguous_repo", "仓库选择不明确，自动检测最近仓库", "low")
         else:
             return ErrorAnalysis("unknown", f"未分类错误: {error[:100]}", "medium")
 
@@ -238,29 +238,31 @@ class Reflection:
                               {"repo_name": ""}, 2, 0.4, "检查Python版本兼容性后重试"),
             ],
             "ambiguous_repo": [
-                FixSuggestion("clone_tool",
-                              {"repo_url": ""}, 1, 0.5, "先确认/克隆目标仓库"),
-                FixSuggestion("setup_tool",
-                              {"repo_name": ""}, 2, 0.7, "指定仓库名后重试"),
+                FixSuggestion("list_workspace_tool", {}, 1, 0.7,
+                              "列出工作区中所有仓库供用户选择"),
+                FixSuggestion("python_env_tool",
+                              {"action": "recon", "repo_path": ""},
+                              2, 0.8,
+                              "使用 auto-detect 选择最近修改的仓库"),
             ],
             "no_entry_point": [
-                FixSuggestion("execute_tool",
-                              {"script": ""}, 1, 0.7,
-                              "查看仓库文件列表，指定正确的入口脚本名（如 denoising.ipynb）"),
-                FixSuggestion("execute_tool",
-                              {"command": ""}, 2, 0.5,
-                              "直接指定完整执行命令"),
+                FixSuggestion("execute_session_tool",
+                              {}, 1, 0.7,
+                              "进入对话式执行，自动检测项目入口"),
+                FixSuggestion("python_env_tool",
+                              {"action": "recon"}, 2, 0.5,
+                              "侦察项目结构后重试"),
             ],
             # Execute error fixes
             "missing_file": [
-                FixSuggestion("execute_tool",
-                              {"command": ""}, 1, 0.5, "检查数据文件路径后重试"),
+                FixSuggestion("execute_session_tool",
+                              {}, 1, 0.5, "检查数据文件路径后重试"),
                 FixSuggestion("fetch_tool",
                               {"url": ""}, 2, 0.3, "查看README了解数据准备步骤"),
             ],
             "gpu_error": [
-                FixSuggestion("execute_tool",
-                              {"command": ""}, 1, 0.6, "尝试添加 --device cpu 参数重试"),
+                FixSuggestion("execute_session_tool",
+                              {}, 1, 0.6, "尝试添加 --device cpu 参数重试"),
                 FixSuggestion("execute_tool",
                               {}, 2, 0.3, "检查CUDA/cuDNN安装或使用CPU"),
             ],

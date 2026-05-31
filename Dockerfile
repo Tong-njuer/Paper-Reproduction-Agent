@@ -42,7 +42,7 @@ RUN python3.11 -m pip install --no-cache-dir -r requirements.txt \
 COPY app/ ./app/
 COPY .chainlit/ ./.chainlit/
 COPY public/ ./public/
-COPY chainlit.md ./
+COPY docs/chainlit.md ./chainlit.md
 
 RUN mkdir -p /app/logs /app/data/memory /app/workspace
 
